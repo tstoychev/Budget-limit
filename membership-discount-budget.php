@@ -3,7 +3,7 @@
  * Plugin Name: Membership Discount Budget
  * Description: Manages a monthly discount budget for WooCommerce Membership users.
  * Version: 1.1.0
- * Author: Your Name
+ * Author: 1 Click Studio Ltd
  * Text Domain: membership-discount-budget
  * Domain Path: /languages
  * Requires at least: 5.0
