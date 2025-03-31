@@ -24,7 +24,7 @@ jobs:
           password: ${{ secrets.FTP_PASSWORD }}
           local-dir: "./"
           server-dir: "/www/www/wp-content/plugins/Budget-limit-main/"
-          dangerous-clean-slate: true
+          dangerous-clean-slate: false
           exclude: |
            **/.git**
             **/.git*/**
