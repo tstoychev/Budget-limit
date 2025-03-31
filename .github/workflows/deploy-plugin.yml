@@ -23,7 +23,7 @@ jobs:
           username: ${{ secrets.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD }}
           local-dir: "./"
-          server-dir: "/wp-content/plugins/Budget-limit-main/"
+          server-dir: "/www/www/wp-content/plugins/Budget-limit-main/"
           dangerous-clean-slate: true
           exclude: |
            **/.git**
