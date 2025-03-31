@@ -1,0 +1,29 @@
+name: Deploy Plugin to Live Website
+
+on:
+  push:
+    branches:
+      - main # or your deployment branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+
+      # Step 1: Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Deploy to live website via FTP
+      - name: FTP Deploy
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          local-dir: "./"
+          server-dir: "/wp-content/plugins/Budget-limit-main/"
+          exclude: |
+            **/.git*
+            **/.github/**
+            **/node_modules/**
