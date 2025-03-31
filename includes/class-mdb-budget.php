@@ -29,16 +29,14 @@ class MDB_Budget {
         // Initialize budget when membership becomes active
         add_action('wc_memberships_user_membership_status_changed', array($this, 'handle_membership_status_change'), 10, 3);
         
-        // Track discounts after order is completed or processed
+        // Track discounts after order is completed
         add_action('woocommerce_order_status_completed', array($this, 'track_discount_usage'));
-        add_action('woocommerce_order_status_processing', array($this, 'track_discount_usage'));
         
         // Monthly reset
         add_action('mdb_monthly_reset', array($this, 'reset_active_memberships_budget'));
         
         // Budget validation
         add_action('woocommerce_before_cart', array($this, 'display_budget_warning_on_cart'));
-        add_action('woocommerce_before_checkout_form', array($this, 'display_budget_warning_on_cart')); // Add to checkout too
         add_action('woocommerce_before_checkout_process', array($this, 'check_discount_budget_before_checkout'));
         add_filter('woocommerce_add_to_cart_validation', array($this, 'validate_add_to_cart'), 10, 3);
         
@@ -121,10 +119,7 @@ class MDB_Budget {
         }
         
         $user_id = get_current_user_id();
-        $memberships = wc_memberships_get_user_memberships(array(
-            'user_id' => $user_id,
-            'status' => 'active'
-        ));
+        $memberships = wc_memberships_get_user_active_memberships($user_id);
         
         if (empty($memberships)) {
             return;
@@ -136,7 +131,7 @@ class MDB_Budget {
         $membership_plans = array();
         
         foreach ($memberships as $membership) {
-            if (empty($allowed_plans) || in_array($membership->get_plan_id(), (array) $allowed_plans)) {
+            if (empty($allowed_plans) || in_array($membership->get_plan_id(), $allowed_plans)) {
                 $user_has_allowed_plan = true;
                 $membership_plans[] = $membership->get_plan_id();
             }
@@ -150,17 +145,7 @@ class MDB_Budget {
         $budget_data = $this->get_user_current_budget($user_id);
         
         if (!$budget_data) {
-            // Try to initialize budget if it doesn't exist
-            foreach ($memberships as $membership) {
-                $this->initialize_user_budget($membership);
-            }
-            
-            // Check again after initialization
-            $budget_data = $this->get_user_current_budget($user_id);
-            
-            if (!$budget_data) {
-                return;
-            }
+            return;
         }
         
         // Calculate potential discount in current cart
@@ -188,10 +173,7 @@ class MDB_Budget {
         }
         
         $user_id = get_current_user_id();
-        $memberships = wc_memberships_get_user_memberships(array(
-            'user_id' => $user_id,
-            'status' => 'active'
-        ));
+        $memberships = wc_memberships_get_user_active_memberships($user_id);
         
         if (empty($memberships)) {
             return 0;
@@ -210,7 +192,7 @@ class MDB_Budget {
         $membership_plans = array();
         
         foreach ($memberships as $membership) {
-            if (empty($allowed_plans) || in_array($membership->get_plan_id(), (array) $allowed_plans)) {
+            if (empty($allowed_plans) || in_array($membership->get_plan_id(), $allowed_plans)) {
                 $user_has_allowed_plan = true;
                 $membership_plans[] = $membership->get_plan_id();
             }
@@ -263,10 +245,7 @@ class MDB_Budget {
         }
         
         $user_id = get_current_user_id();
-        $memberships = wc_memberships_get_user_memberships(array(
-            'user_id' => $user_id,
-            'status' => 'active'
-        ));
+        $memberships = wc_memberships_get_user_active_memberships($user_id);
         
         if (empty($memberships)) {
             return;
@@ -289,7 +268,7 @@ class MDB_Budget {
         $user_has_allowed_plan = false;
         
         foreach ($memberships as $membership) {
-            if (empty($allowed_plans) || in_array($membership->get_plan_id(), (array) $allowed_plans)) {
+            if (empty($allowed_plans) || in_array($membership->get_plan_id(), $allowed_plans)) {
                 $user_has_allowed_plan = true;
                 break;
             }
@@ -322,10 +301,7 @@ class MDB_Budget {
         }
         
         $user_id = get_current_user_id();
-        $memberships = wc_memberships_get_user_memberships(array(
-            'user_id' => $user_id,
-            'status' => 'active'
-        ));
+        $memberships = wc_memberships_get_user_active_memberships($user_id);
         
         if (empty($memberships)) {
             return $passed;
@@ -349,7 +325,7 @@ class MDB_Budget {
         $membership_plans = array();
         
         foreach ($memberships as $membership) {
-            if (empty($allowed_plans) || in_array($membership->get_plan_id(), (array) $allowed_plans)) {
+            if (empty($allowed_plans) || in_array($membership->get_plan_id(), $allowed_plans)) {
                 $user_has_allowed_plan = true;
                 $membership_plans[] = $membership->get_plan_id();
             }
@@ -427,7 +403,7 @@ class MDB_Budget {
         // Check if this membership plan should have a budget
         $allowed_plans = get_option('mdb_allowed_plans', array());
         
-        if (!empty($allowed_plans) && !in_array($user_membership->get_plan_id(), (array) $allowed_plans)) {
+        if (!empty($allowed_plans) && !in_array($user_membership->get_plan_id(), $allowed_plans)) {
             return false;
         }
         
@@ -535,7 +511,7 @@ class MDB_Budget {
                 
                 // Check if this plan should have a budget
                 $allowed_plans = get_option('mdb_allowed_plans', array());
-                if (!empty($allowed_plans) && !in_array($plan_id, (array) $allowed_plans)) {
+                if (!empty($allowed_plans) && !in_array($plan_id, $allowed_plans)) {
                     continue;
                 }
                 
@@ -616,7 +592,6 @@ class MDB_Budget {
         } catch (Exception $e) {
             // Rollback on error
             $wpdb->query('ROLLBACK');
-            error_log('MDB ERROR: Failed to reset budgets: ' . $e->getMessage());
         }
     }
     
@@ -626,29 +601,21 @@ class MDB_Budget {
      * @param int $order_id Order ID
      */
     public function track_discount_usage($order_id) {
-        error_log('MDB DEBUG: Processing order #' . $order_id . ' for budget tracking');
-        
         $order = wc_get_order($order_id);
         
         if (!$order) {
-            error_log('MDB DEBUG: Order #' . $order_id . ' not found');
             return;
         }
         
         $user_id = $order->get_user_id();
         
         if (!$user_id) {
-            error_log('MDB DEBUG: Order #' . $order_id . ' has no user ID');
             return;
         }
         
-        $memberships = wc_memberships_get_user_memberships(array(
-            'user_id' => $user_id,
-            'status' => 'active'
-        ));
+        $memberships = wc_memberships_get_user_active_memberships($user_id);
         
         if (empty($memberships)) {
-            error_log('MDB DEBUG: User ID ' . $user_id . ' has no active memberships');
             return;
         }
         
@@ -658,16 +625,13 @@ class MDB_Budget {
         $membership_plans = array();
         
         foreach ($memberships as $membership) {
-            $plan_id = $membership->get_plan_id();
-            if (empty($allowed_plans) || in_array($plan_id, (array) $allowed_plans)) {
+            if (empty($allowed_plans) || in_array($membership->get_plan_id(), $allowed_plans)) {
                 $user_has_allowed_plan = true;
-                $membership_plans[] = $plan_id;
-                error_log('MDB DEBUG: User ID ' . $user_id . ' has allowed plan: ' . $plan_id);
+                $membership_plans[] = $membership->get_plan_id();
             }
         }
         
         if (!$user_has_allowed_plan) {
-            error_log('MDB DEBUG: User ID ' . $user_id . ' has no allowed membership plans');
             return;
         }
         
@@ -675,30 +639,14 @@ class MDB_Budget {
         $budget_data = $this->get_user_current_budget($user_id);
         
         if (!$budget_data) {
-            error_log('MDB DEBUG: User ID ' . $user_id . ' has no budget data, trying to initialize');
-            // Try to initialize budget for the first membership
-            $this->initialize_user_budget($memberships[0]);
-            $budget_data = $this->get_user_current_budget($user_id);
-            
-            if (!$budget_data) {
-                error_log('MDB DEBUG: Failed to initialize budget for User ID ' . $user_id);
-                return;
-            }
+            return;
         }
         
         // Calculate order discount
         $order_discount = $this->calculate_order_discount($order, $membership_plans);
-        error_log('MDB DEBUG: Order #' . $order_id . ' calculated discount: ' . $order_discount);
         
         // Limit the discount to remaining budget
         $actual_discount = min($order_discount, $budget_data->remaining_budget);
-        error_log('MDB DEBUG: Order #' . $order_id . ' actual discount (limited by budget): ' . $actual_discount);
-        
-        // Skip if no discount to apply
-        if ($actual_discount <= 0) {
-            error_log('MDB DEBUG: Order #' . $order_id . ' has no discount to apply');
-            return;
-        }
         
         // Action before updating budget usage
         do_action('mdb_before_discount_usage_update', $user_id, $order_id, $actual_discount, $budget_data);
@@ -710,7 +658,7 @@ class MDB_Budget {
         $new_used_amount = min($budget_data->total_budget, $budget_data->used_amount + $actual_discount);
         $new_remaining_budget = max(0, $budget_data->total_budget - $new_used_amount);
         
-        $result = $wpdb->update(
+        $wpdb->update(
             $table,
             [
                 'used_amount' => $new_used_amount,
@@ -721,20 +669,12 @@ class MDB_Budget {
             ['%d']
         );
         
-        if ($result) {
-            error_log('MDB DEBUG: Successfully updated budget for User ID ' . $user_id . ', new used: ' . $new_used_amount . ', new remaining: ' . $new_remaining_budget);
-        } else {
-            error_log('MDB DEBUG: Failed to update budget for User ID ' . $user_id);
-        }
-        
         // Clear cached budget data
         $this->clear_user_budget_cache($user_id);
         
         // Add order meta to track budget usage
         $order->update_meta_data('_membership_discount_budget_used', $actual_discount);
         $order->save();
-        
-        error_log('MDB DEBUG: Added meta to Order #' . $order_id . ' with discount amount: ' . $actual_discount);
         
         // Action after updating budget usage
         do_action('mdb_after_discount_usage_update', $user_id, $order_id, $actual_discount, $new_remaining_budget);
@@ -748,8 +688,6 @@ class MDB_Budget {
      * @return float The total discount amount
      */
     public function calculate_order_discount($order, $membership_plans) {
-        error_log('MDB DEBUG: Calculating order discount for Order #' . $order->get_id());
-        
         $order_discount = 0;
         
         foreach ($order->get_items() as $item) {
@@ -762,10 +700,6 @@ class MDB_Budget {
             
             // Get regular price
             $regular_price = floatval($product->get_regular_price());
-            $sale_price = floatval($product->get_sale_price());
-            $actual_price = floatval($item->get_subtotal() / $item->get_quantity());
-            
-            error_log('MDB DEBUG: Item: ' . $product->get_name() . ', Regular: ' . $regular_price . ', Sale: ' . $sale_price . ', Actual: ' . $actual_price);
             
             // Skip if no regular price is set
             if (empty($regular_price) || $regular_price <= 0) {
@@ -774,7 +708,6 @@ class MDB_Budget {
             
             // Get membership discount for this product
             $discount_percentage = $this->get_product_membership_discount($product_id, $membership_plans);
-            error_log('MDB DEBUG: Product ID ' . $product_id . ' discount percentage: ' . $discount_percentage);
             
             if ($discount_percentage > 0) {
                 // Calculate the discount amount
@@ -783,29 +716,22 @@ class MDB_Budget {
                 // Allow plugins to modify the discount amount
                 $item_discount = apply_filters('mdb_order_item_discount', $item_discount, $product_id, $item, $discount_percentage);
                 
-                error_log('MDB DEBUG: Item discount: ' . $item_discount);
                 $order_discount += $item_discount;
             }
         }
         
         // Allow plugins to modify the total order discount
-        $final_discount = apply_filters('mdb_order_total_discount', $order_discount, $order, $membership_plans);
-        error_log('MDB DEBUG: Total order discount: ' . $final_discount);
-        
-        return $final_discount;
+        return apply_filters('mdb_order_total_discount', $order_discount, $order, $membership_plans);
     }
     
     /**
-    * Get the membership discount percentage for a specific product
+     * Get the membership discount percentage for a specific product
      * 
      * @param int $product_id The product ID
      * @param array $membership_plans Array of membership plan IDs
      * @return float The discount percentage (0-100)
      */
     public function get_product_membership_discount($product_id, $membership_plans) {
-        // Debug output
-        error_log("MDB DEBUG: Checking discount for product ID $product_id with plans: " . print_r($membership_plans, true));
-        
         // Cache key
         $cache_key = 'product_discount_' . $product_id . '_' . md5(serialize($membership_plans));
         $discount_percentage = wp_cache_get($cache_key, $this->cache_group);
@@ -819,13 +745,11 @@ class MDB_Budget {
         
         // Bail if no membership plans
         if (empty($membership_plans)) {
-            error_log("MDB DEBUG: No membership plans provided");
             return $discount_percentage;
         }
         
         // Check if WC Memberships has the required function
         if (!function_exists('wc_memberships_get_product_purchasing_discount_rules')) {
-            error_log("MDB DEBUG: Function wc_memberships_get_product_purchasing_discount_rules not found");
             return $discount_percentage;
         }
         
@@ -833,17 +757,13 @@ class MDB_Budget {
         $product_discount_rules = wc_memberships_get_product_purchasing_discount_rules($product_id);
         
         if (empty($product_discount_rules)) {
-            error_log("MDB DEBUG: No discount rules found for product ID $product_id");
             wp_cache_set($cache_key, $discount_percentage, $this->cache_group, 3600);
             return $discount_percentage;
         }
         
-        error_log("MDB DEBUG: Found " . count($product_discount_rules) . " discount rules for product ID $product_id");
-        
         // Find the highest discount percentage that applies to the user's membership plans
         foreach ($product_discount_rules as $rule) {
             $rule_plan_id = $rule->get_membership_plan_id();
-            error_log("MDB DEBUG: Rule plan ID: $rule_plan_id, discount: " . $rule->get_discount_amount());
             
             if (in_array($rule_plan_id, $membership_plans)) {
                 $rule_discount = $rule->get_discount_amount();
@@ -851,7 +771,6 @@ class MDB_Budget {
                 // Always use the highest discount percentage
                 if ($rule_discount > $discount_percentage) {
                     $discount_percentage = $rule_discount;
-                    error_log("MDB DEBUG: Using discount: $discount_percentage%");
                 }
             }
         }
