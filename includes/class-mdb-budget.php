@@ -36,10 +36,288 @@ class MDB_Budget {
         add_action('mdb_monthly_reset', array($this, 'reset_active_memberships_budget'));
         
         // Budget validation
+        add_action('woocommerce_before_cart', array($this, 'display_budget_warning_on_cart'));
         add_action('woocommerce_before_checkout_process', array($this, 'check_discount_budget_before_checkout'));
         add_filter('woocommerce_add_to_cart_validation', array($this, 'validate_add_to_cart'), 10, 3);
     }
+
+    /**
+     * Display budget warning on cart page
+     */
+    public function display_budget_warning_on_cart() {
+        if (!is_user_logged_in()) {
+            return;
+        }
+        
+        $user_id = get_current_user_id();
+        $memberships = wc_memberships_get_user_active_memberships($user_id);
+        
+        if (empty($memberships)) {
+            return;
+        }
+        
+        // Check if user's membership plan is allowed
+        $allowed_plans = get_option('mdb_allowed_plans', array());
+        $user_has_allowed_plan = false;
+        $membership_plans = array();
+        
+        foreach ($memberships as $membership) {
+            if (empty($allowed_plans) || in_array($membership->get_plan_id(), $allowed_plans)) {
+                $user_has_allowed_plan = true;
+                $membership_plans[] = $membership->get_plan_id();
+            }
+        }
+        
+        if (!$user_has_allowed_plan) {
+            return;
+        }
+        
+        // Get current budget data
+        $budget_data = $this->get_user_current_budget($user_id);
+        
+        if (!$budget_data) {
+            return;
+        }
+        
+        // Calculate potential discount in current cart
+        $cart_discount = $this->calculate_potential_cart_discount();
+        
+        // Check if discount exceeds remaining budget
+        if ($cart_discount > $budget_data->remaining_budget) {
+            wc_add_notice(
+                sprintf(
+                    __('Budget Warning: Your order contains %s in membership discounts, but you only have %s remaining in your discount budget. Some items may be charged at full price.', 'membership-discount-budget'),
+                    wc_price($cart_discount),
+                    wc_price($budget_data->remaining_budget)
+                ),
+                'notice'
+            );
+
+            // Log the budget overflow event
+            error_log(sprintf(
+                'Budget Warning: User %d - Cart Discount %s exceeds Remaining Budget %s',
+                $user_id, 
+                wc_price($cart_discount), 
+                wc_price($budget_data->remaining_budget)
+            ));
+        }
+    }
     
+    /**
+     * Calculate potential cart discount with budget tracking
+     */
+    public function calculate_potential_cart_discount() {
+        if (!is_user_logged_in() || WC()->cart->is_empty()) {
+            return 0;
+        }
+        
+        $user_id = get_current_user_id();
+        $memberships = wc_memberships_get_user_active_memberships($user_id);
+        
+        if (empty($memberships)) {
+            return 0;
+        }
+        
+        // Get current budget data
+        $budget_data = $this->get_user_current_budget($user_id);
+        
+        if (!$budget_data || $budget_data->remaining_budget <= 0) {
+            return 0;
+        }
+        
+        // Check if user's membership plan is allowed
+        $allowed_plans = get_option('mdb_allowed_plans', array());
+        $user_has_allowed_plan = false;
+        $membership_plans = array();
+        
+        foreach ($memberships as $membership) {
+            if (empty($allowed_plans) || in_array($membership->get_plan_id(), $allowed_plans)) {
+                $user_has_allowed_plan = true;
+                $membership_plans[] = $membership->get_plan_id();
+            }
+        }
+        
+        if (!$user_has_allowed_plan) {
+            return 0;
+        }
+        
+        $discount_amount = 0;
+        
+        foreach (WC()->cart->get_cart() as $cart_item) {
+            $product = $cart_item['data'];
+            
+            if (!$product) {
+                continue;
+            }
+            
+            // Get regular price
+            $regular_price = floatval($product->get_regular_price());
+            
+            // Skip if no regular price is set
+            if (empty($regular_price) || $regular_price <= 0) {
+                continue;
+            }
+            
+            // Get membership discount for this product
+            $discount_percentage = $this->get_product_membership_discount($product->get_id(), $membership_plans);
+            
+            if ($discount_percentage > 0) {
+                // Calculate the discount amount based on the regular price and percentage
+                $item_discount = $regular_price * ($discount_percentage / 100) * $cart_item['quantity'];
+                
+                $discount_amount += $item_discount;
+            }
+        }
+        
+        // Limit discount to remaining budget
+        $discount_amount = min($discount_amount, $budget_data->remaining_budget);
+        
+        return $discount_amount;
+    }
+    
+    /**
+     * Check discount budget before checkout
+     */
+    public function check_discount_budget_before_checkout() {
+        if (!is_user_logged_in() || WC()->cart->is_empty()) {
+            return;
+        }
+        
+        $user_id = get_current_user_id();
+        $memberships = wc_memberships_get_user_active_memberships($user_id);
+        
+        if (empty($memberships)) {
+            return;
+        }
+        
+        // Get current budget data
+        $budget_data = $this->get_user_current_budget($user_id);
+        
+        if (!$budget_data || $budget_data->remaining_budget <= 0) {
+            // Add a notice that no discounts are available
+            wc_add_notice(
+                __('Your monthly discount budget has been exhausted. All products will be charged at full price.', 'membership-discount-budget'),
+                'notice'
+            );
+            return;
+        }
+        
+        // Check if user's membership plan is allowed
+        $allowed_plans = get_option('mdb_allowed_plans', array());
+        $user_has_allowed_plan = false;
+        
+        foreach ($memberships as $membership) {
+            if (empty($allowed_plans) || in_array($membership->get_plan_id(), $allowed_plans)) {
+                $user_has_allowed_plan = true;
+                break;
+            }
+        }
+        
+        if (!$user_has_allowed_plan) {
+            return;
+        }
+        
+        // Calculate potential discount in current cart
+        $cart_discount = $this->calculate_potential_cart_discount();
+        
+        // Add a notice about the available budget
+        wc_add_notice(
+            sprintf(
+                __('Available Discount Budget: %s of your %s monthly budget remains.', 'membership-discount-budget'),
+                wc_price($budget_data->remaining_budget),
+                wc_price($budget_data->total_budget)
+            ),
+            'notice'
+        );
+    }
+    
+    /**
+     * Validate adding items to cart
+     */
+    public function validate_add_to_cart($passed, $product_id, $quantity) {
+        if (!is_user_logged_in() || !$passed) {
+            return $passed;
+        }
+        
+        $user_id = get_current_user_id();
+        $memberships = wc_memberships_get_user_active_memberships($user_id);
+        
+        if (empty($memberships)) {
+            return $passed;
+        }
+        
+        // Get current budget data
+        $budget_data = $this->get_user_current_budget($user_id);
+        
+        if (!$budget_data || $budget_data->remaining_budget <= 0) {
+            // No budget available, show a warning
+            wc_add_notice(
+                __('Your monthly discount budget has been exhausted. Products will be charged at full price.', 'membership-discount-budget'),
+                'notice'
+            );
+            return $passed;
+        }
+        
+        // Check if user's membership plan is allowed
+        $allowed_plans = get_option('mdb_allowed_plans', array());
+        $user_has_allowed_plan = false;
+        $membership_plans = array();
+        
+        foreach ($memberships as $membership) {
+            if (empty($allowed_plans) || in_array($membership->get_plan_id(), $allowed_plans)) {
+                $user_has_allowed_plan = true;
+                $membership_plans[] = $membership->get_plan_id();
+            }
+        }
+        
+        if (!$user_has_allowed_plan) {
+            return $passed;
+        }
+        
+        // Get product
+        $product = wc_get_product($product_id);
+        
+        if (!$product) {
+            return $passed;
+        }
+        
+        // Get regular price
+        $regular_price = floatval($product->get_regular_price());
+        
+        // Skip if no regular price is set
+        if (empty($regular_price) || $regular_price <= 0) {
+            return $passed;
+        }
+        
+        // Get membership discount for this product
+        $discount_percentage = $this->get_product_membership_discount($product_id, $membership_plans);
+        
+        if ($discount_percentage <= 0) {
+            return $passed;
+        }
+        
+        // Calculate new item discount
+        $new_item_discount = $regular_price * ($discount_percentage / 100) * $quantity;
+        
+        // Calculate current cart discount
+        $current_cart_discount = $this->calculate_potential_cart_discount();
+        
+        // Check if adding this item would exceed budget
+        $total_discount = $current_cart_discount + $new_item_discount;
+        
+        if ($total_discount > $budget_data->remaining_budget) {
+            wc_add_notice(
+                sprintf(
+                    __('Budget Notice: Adding this product would exceed your remaining discount budget of %s. The product will be added at full price.', 'membership-discount-budget'),
+                    wc_price($budget_data->remaining_budget)
+                ),
+                'notice'
+            );
+        }
+        
+        return $passed;
+    }
+
     /**
      * Handle membership status change
      *
@@ -141,8 +419,7 @@ class MDB_Budget {
     }
     
     /**
-     * Reset budget for all active memberships (monthly cron)
-     */
+     * Reset budget for all active memberships (monthly cron)*/
     public function reset_active_memberships_budget() {
         global $wpdb;
         
@@ -317,19 +594,17 @@ class MDB_Budget {
         // Calculate order discount
         $order_discount = $this->calculate_order_discount($order, $membership_plans);
         
-        // If no discount was applied, nothing to track
-        if ($order_discount <= 0) {
-            return;
-        }
+        // Limit the discount to remaining budget
+        $actual_discount = min($order_discount, $budget_data->remaining_budget);
         
         // Action before updating budget usage
-        do_action('mdb_before_discount_usage_update', $user_id, $order_id, $order_discount, $budget_data);
+        do_action('mdb_before_discount_usage_update', $user_id, $order_id, $actual_discount, $budget_data);
         
         // Update budget usage
         global $wpdb;
         $table = $wpdb->prefix . 'membership_discount_budget';
         
-        $new_used_amount = min($budget_data->total_budget, $budget_data->used_amount + $order_discount);
+        $new_used_amount = min($budget_data->total_budget, $budget_data->used_amount + $actual_discount);
         $new_remaining_budget = max(0, $budget_data->total_budget - $new_used_amount);
         
         $wpdb->update(
@@ -347,11 +622,22 @@ class MDB_Budget {
         $this->clear_user_budget_cache($user_id);
         
         // Add order meta to track budget usage
-        $order->update_meta_data('_membership_discount_budget_used', $order_discount);
+        $order->update_meta_data('_membership_discount_budget_used', $actual_discount);
         $order->save();
         
+        // Log the actual discount used
+        error_log(sprintf(
+            'Membership Budget Usage: User %d used %s of their budget in order %d. Total discount calculated: %s, Actual discount applied: %s, Remaining budget: %s',
+            $user_id, 
+            wc_price($actual_discount), 
+            $order_id,
+            wc_price($order_discount),
+            wc_price($actual_discount),
+            wc_price($new_remaining_budget)
+        ));
+        
         // Action after updating budget usage
-        do_action('mdb_after_discount_usage_update', $user_id, $order_id, $order_discount, $new_remaining_budget);
+        do_action('mdb_after_discount_usage_update', $user_id, $order_id, $actual_discount, $new_remaining_budget);
     }
     
     /**
@@ -456,240 +742,6 @@ class MDB_Budget {
         wp_cache_set($cache_key, $discount_percentage, $this->cache_group, 3600);
         
         return $discount_percentage;
-    }
-    
-    /**
-     * Calculate potential discount for the current cart
-     *
-     * @return float The total potential discount
-     */
-    public function calculate_potential_cart_discount() {
-        if (!is_user_logged_in() || WC()->cart->is_empty()) {
-            return 0;
-        }
-        
-        $user_id = get_current_user_id();
-        $memberships = wc_memberships_get_user_active_memberships($user_id);
-        
-        if (empty($memberships)) {
-            return 0;
-        }
-        
-        // Check if user's membership plan is allowed
-        $allowed_plans = get_option('mdb_allowed_plans', array());
-        $user_has_allowed_plan = false;
-        $membership_plans = array();
-        
-        foreach ($memberships as $membership) {
-            if (empty($allowed_plans) || in_array($membership->get_plan_id(), $allowed_plans)) {
-                $user_has_allowed_plan = true;
-                $membership_plans[] = $membership->get_plan_id();
-            }
-        }
-        
-        if (!$user_has_allowed_plan) {
-            return 0;
-        }
-        
-        // Cache cart calculation
-        $cart_contents = WC()->cart->get_cart_contents();
-        $cache_key = 'cart_discount_' . md5(serialize($cart_contents) . serialize($membership_plans));
-        $discount_amount = wp_cache_get($cache_key, $this->cache_group);
-        
-        if (false !== $discount_amount) {
-            return $discount_amount;
-        }
-        
-        $discount_amount = 0;
-        
-        foreach (WC()->cart->get_cart() as $cart_item) {
-            $product = $cart_item['data'];
-            
-            if (!$product) {
-                continue;
-            }
-            
-            // Get regular price
-            $regular_price = floatval($product->get_regular_price());
-            
-            // Skip if no regular price is set
-            if (empty($regular_price) || $regular_price <= 0) {
-                continue;
-            }
-            
-            // Get membership discount for this product specifically
-            $discount_percentage = $this->get_product_membership_discount($product->get_id(), $membership_plans);
-            
-            if ($discount_percentage > 0) {
-                // Calculate the discount amount based on the regular price and percentage
-                $item_discount = $regular_price * ($discount_percentage / 100) * $cart_item['quantity'];
-                
-                // Allow plugins to modify the cart item discount
-                $item_discount = apply_filters('mdb_cart_item_discount', $item_discount, $product->get_id(), $cart_item, $discount_percentage);
-                
-                $discount_amount += $item_discount;
-            }
-        }
-        
-        // Allow plugins to modify the total cart discount
-        $discount_amount = apply_filters('mdb_cart_total_discount', $discount_amount, $cart_contents, $membership_plans);
-        
-        // Cache the result
-        wp_cache_set($cache_key, $discount_amount, $this->cache_group, 60); // Short cache time for cart
-        
-        return $discount_amount;
-    }
-    
-    /**
-     * Check discount budget before checkout
-     */
-    public function check_discount_budget_before_checkout() {
-        if (!is_user_logged_in() || WC()->cart->is_empty()) {
-            return;
-        }
-        
-        $user_id = get_current_user_id();
-        $memberships = wc_memberships_get_user_active_memberships($user_id);
-        
-        if (empty($memberships)) {
-            return;
-        }
-        
-        // Check if user's membership plan is allowed
-        $allowed_plans = get_option('mdb_allowed_plans', array());
-        $user_has_allowed_plan = false;
-        
-        foreach ($memberships as $membership) {
-            if (empty($allowed_plans) || in_array($membership->get_plan_id(), $allowed_plans)) {
-                $user_has_allowed_plan = true;
-                break;
-            }
-        }
-        
-        if (!$user_has_allowed_plan) {
-            return;
-        }
-        
-        // Get current budget data
-        $budget_data = $this->get_user_current_budget($user_id);
-        
-        if (!$budget_data) {
-            return;
-        }
-        
-        // Calculate potential discount in current cart
-        $cart_discount = $this->calculate_potential_cart_discount();
-        
-        // Check if discount exceeds remaining budget
-        if ($cart_discount > $budget_data->remaining_budget) {
-            // Allow plugins to override the budget validation
-            $override = apply_filters('mdb_override_budget_validation', false, $cart_discount, $budget_data, $user_id);
-            
-            if (!$override) {
-                wc_add_notice(
-                    sprintf(
-                        __('Your order contains %s in membership discounts, but you only have %s remaining in your discount budget. Please remove some items or contact an administrator.', 'membership-discount-budget'),
-                        wc_price($cart_discount),
-                        wc_price($budget_data->remaining_budget)
-                    ),
-                    'error'
-                );
-            }
-        }
-    }
-    
-    /**
-     * Validate adding items to cart
-     *
-     * @param bool $passed Validation status
-     * @param int $product_id Product ID
-     * @param int $quantity Quantity
-     * @return bool Modified validation status
-     */
-    public function validate_add_to_cart($passed, $product_id, $quantity) {
-        if (!is_user_logged_in() || !$passed) {
-            return $passed;
-        }
-        
-        $user_id = get_current_user_id();
-        $memberships = wc_memberships_get_user_active_memberships($user_id);
-        
-        if (empty($memberships)) {
-            return $passed;
-        }
-        
-        // Check if user's membership plan is allowed
-        $allowed_plans = get_option('mdb_allowed_plans', array());
-        $user_has_allowed_plan = false;
-        $membership_plans = array();
-        
-        foreach ($memberships as $membership) {
-            if (empty($allowed_plans) || in_array($membership->get_plan_id(), $allowed_plans)) {
-                $user_has_allowed_plan = true;
-                $membership_plans[] = $membership->get_plan_id();
-            }
-        }
-        
-        if (!$user_has_allowed_plan) {
-            return $passed;
-        }
-        
-        // Get current budget data
-        $budget_data = $this->get_user_current_budget($user_id);
-        
-        if (!$budget_data) {
-            return $passed;
-        }
-        
-        // Get product
-        $product = wc_get_product($product_id);
-        
-        if (!$product) {
-            return $passed;
-        }
-        
-        // Get regular price
-        $regular_price = floatval($product->get_regular_price());
-        
-        // Skip if no regular price is set
-        if (empty($regular_price) || $regular_price <= 0) {
-            return $passed;
-        }
-        
-        // Get membership discount for this product
-        $discount_percentage = $this->get_product_membership_discount($product_id, $membership_plans);
-        
-        if ($discount_percentage <= 0) {
-            return $passed;
-        }
-        
-        // Calculate new item discount
-        $new_item_discount = $regular_price * ($discount_percentage / 100) * $quantity;
-        
-        // Calculate current cart discount
-        $current_cart_discount = $this->calculate_potential_cart_discount();
-        
-        // Check if adding this item would exceed budget
-        $total_discount = $current_cart_discount + $new_item_discount;
-        
-        if ($total_discount > $budget_data->remaining_budget) {
-            // Allow plugins to override the budget validation
-            $override = apply_filters('mdb_override_budget_validation', false, $total_discount, $budget_data, $user_id);
-            
-            if (!$override) {
-                wc_add_notice(
-                    sprintf(
-                        __('Adding this product would exceed your remaining discount budget of %s. The product requires %s of budget.', 'membership-discount-budget'),
-                        wc_price($budget_data->remaining_budget - $current_cart_discount),
-                        wc_price($new_item_discount)
-                    ),
-                    'error'
-                );
-                return false;
-            }
-        }
-        
-        return $passed;
     }
     
     /**
