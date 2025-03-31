@@ -31,6 +31,7 @@ class MDB_Budget {
         
         // Track discounts after order is completed
         add_action('woocommerce_order_status_completed', array($this, 'track_discount_usage'));
+        add_action('woocommerce_order_status_processing', array($this, 'track_discount_usage'));
         
         // Monthly reset
         add_action('mdb_monthly_reset', array($this, 'reset_active_memberships_budget'));
@@ -43,6 +44,7 @@ class MDB_Budget {
         // Filter price with lower priority to prevent recursion issues
         add_filter('woocommerce_product_get_price', array($this, 'adjust_price_based_on_budget'), 999, 2);
         add_action('woocommerce_before_calculate_totals', array($this, 'adjust_cart_prices'), 20);
+        
     }
 
     /**
