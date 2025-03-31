@@ -25,6 +25,7 @@ jobs:
           local-dir: "./"
           server-dir: "/wp-content/plugins/Budget-limit-main/"
           exclude: |
-            **/.git*
+           **/.git**
+            **/.git*/**
             **/.github/**
             **/node_modules/**
