@@ -39,6 +39,75 @@ class MDB_Budget {
         add_action('woocommerce_before_cart', array($this, 'display_budget_warning_on_cart'));
         add_action('woocommerce_before_checkout_process', array($this, 'check_discount_budget_before_checkout'));
         add_filter('woocommerce_add_to_cart_validation', array($this, 'validate_add_to_cart'), 10, 3);
+        
+        // Filter price with lower priority to prevent recursion issues
+        add_filter('woocommerce_product_get_price', array($this, 'adjust_price_based_on_budget'), 999, 2);
+        add_action('woocommerce_before_calculate_totals', array($this, 'adjust_cart_prices'), 20);
+    }
+
+    /**
+     * Adjust product price based on available budget
+     *
+     * @param float $price Product price
+     * @param object $product WC_Product object
+     * @return float Modified price
+     */
+    public function adjust_price_based_on_budget($price, $product) {
+        // Prevent infinite loops and recursion
+        static $is_adjusting_price = false;
+        if ($is_adjusting_price) {
+            return $price;
+        }
+        
+        $is_adjusting_price = true;
+        
+        // Only apply for logged-in users
+        if (!is_user_logged_in()) {
+            $is_adjusting_price = false;
+            return $price;
+        }
+        
+        $user_id = get_current_user_id();
+        $budget_data = $this->get_user_current_budget($user_id);
+        
+        // If no budget or budget exhausted, return regular price
+        if (!$budget_data || $budget_data->remaining_budget <= 0) {
+            $regular_price = $product->get_regular_price();
+            $is_adjusting_price = false;
+            return $regular_price;
+        }
+        
+        $is_adjusting_price = false;
+        return $price;
+    }
+    
+    /**
+     * Adjust cart prices based on available budget
+     *
+     * @param WC_Cart $cart Cart object
+     */
+    public function adjust_cart_prices($cart) {
+        if (is_admin() && !defined('DOING_AJAX')) {
+            return;
+        }
+        
+        if (!is_user_logged_in() || empty($cart->get_cart())) {
+            return;
+        }
+        
+        $user_id = get_current_user_id();
+        $budget_data = $this->get_user_current_budget($user_id);
+        
+        // If no budget or budget exhausted, set all prices to regular
+        if (!$budget_data || $budget_data->remaining_budget <= 0) {
+            foreach ($cart->get_cart() as $cart_item_key => $cart_item) {
+                $product = $cart_item['data'];
+                $regular_price = $product->get_regular_price();
+                if ($regular_price) {
+                    $product->set_price($regular_price);
+                }
+            }
+        }
     }
 
     /**
@@ -92,14 +161,6 @@ class MDB_Budget {
                 ),
                 'notice'
             );
-
-            // Log the budget overflow event
-            error_log(sprintf(
-                'Budget Warning: User %d - Cart Discount %s exceeds Remaining Budget %s',
-                $user_id, 
-                wc_price($cart_discount), 
-                wc_price($budget_data->remaining_budget)
-            ));
         }
     }
     
@@ -107,7 +168,7 @@ class MDB_Budget {
      * Calculate potential cart discount with budget tracking
      */
     public function calculate_potential_cart_discount() {
-        if (!is_user_logged_in() || WC()->cart->is_empty()) {
+        if (!is_user_logged_in() || !WC()->cart || WC()->cart->is_empty()) {
             return 0;
         }
         
@@ -179,7 +240,7 @@ class MDB_Budget {
      * Check discount budget before checkout
      */
     public function check_discount_budget_before_checkout() {
-        if (!is_user_logged_in() || WC()->cart->is_empty()) {
+        if (!is_user_logged_in() || !WC()->cart || WC()->cart->is_empty()) {
             return;
         }
         
@@ -528,19 +589,9 @@ class MDB_Budget {
             // Commit transaction
             $wpdb->query('COMMIT');
             
-            // Log success
-            error_log(sprintf(
-                'Membership Discount Budget reset completed: %d budgets reset, %d budgets created',
-                $reset_count,
-                $create_count
-            ));
-            
         } catch (Exception $e) {
             // Rollback on error
             $wpdb->query('ROLLBACK');
-            
-            // Log error
-            error_log('Membership Discount Budget reset failed: ' . $e->getMessage());
         }
     }
     
@@ -624,17 +675,6 @@ class MDB_Budget {
         // Add order meta to track budget usage
         $order->update_meta_data('_membership_discount_budget_used', $actual_discount);
         $order->save();
-        
-        // Log the actual discount used
-        error_log(sprintf(
-            'Membership Budget Usage: User %d used %s of their budget in order %d. Total discount calculated: %s, Actual discount applied: %s, Remaining budget: %s',
-            $user_id, 
-            wc_price($actual_discount), 
-            $order_id,
-            wc_price($order_discount),
-            wc_price($actual_discount),
-            wc_price($new_remaining_budget)
-        ));
         
         // Action after updating budget usage
         do_action('mdb_after_discount_usage_update', $user_id, $order_id, $actual_discount, $new_remaining_budget);
