@@ -347,30 +347,31 @@ class MDB_Frontend {
      * @param WC_Order $order Order object.
      */
     public function display_order_budget_info($order) {
-        $discount_used = $order->get_meta('_mdb_discount_used');
-        $remaining_budget = $order->get_meta('_mdb_remaining_budget');
-        
-        if (!$discount_used) {
-            return;
-        }
-        
-        ?>
-        <h2><?php _e('Discount Budget Information', 'membership-discount-budget'); ?></h2>
-        
-        <table class="woocommerce-table mdb-order-budget-table">
-            <tbody>
-                <tr>
-                    <th><?php _e('Discount Used:', 'membership-discount-budget'); ?></th>
-                    <td><?php echo wc_price($discount_used); ?></td>
-                </tr>
-                <tr>
-                    <th><?php _e('Remaining Budget After Order:', 'membership-discount-budget'); ?></th>
-                    <td><?php echo wc_price($remaining_budget); ?></td>
-                </tr>
-            </tbody>
-        </table>
-        <?php
+    // HPOS compatible way to get meta data
+    $discount_used = $order->get_meta('_mdb_discount_used');
+    $remaining_budget = $order->get_meta('_mdb_remaining_budget');
+    
+    if (!$discount_used) {
+        return;
     }
+    
+    ?>
+    <h2><?php _e('Discount Budget Information', 'membership-discount-budget'); ?></h2>
+    
+    <table class="woocommerce-table mdb-order-budget-table">
+        <tbody>
+            <tr>
+                <th><?php _e('Discount Used:', 'membership-discount-budget'); ?></th>
+                <td><?php echo wc_price($discount_used); ?></td>
+            </tr>
+            <tr>
+                <th><?php _e('Remaining Budget After Order:', 'membership-discount-budget'); ?></th>
+                <td><?php echo wc_price($remaining_budget); ?></td>
+            </tr>
+        </tbody>
+    </table>
+    <?php
+}
 
     /**
      * Enqueue frontend assets.
