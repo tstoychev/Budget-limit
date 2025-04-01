@@ -125,27 +125,27 @@ final class Membership_Discount_Budget {
     }
 
     /**
-     * Check plugin dependencies.
-     */
-    public function check_dependencies() {
-        // Check for WooCommerce
-        if (!class_exists('WooCommerce')) {
-            add_action('admin_notices', array($this, 'woocommerce_missing_notice'));
-            return;
-        }
-
-        // Check for WooCommerce Memberships
-        if (!class_exists('WC_Memberships')) {
-            add_action('admin_notices', array($this, 'memberships_missing_notice'));
-            return;
-        }
-
-        // Check for WooCommerce Subscriptions
-        if (!class_exists('WC_Subscriptions')) {
-            add_action('admin_notices', array($this, 'subscriptions_missing_notice'));
-            return;
-        }
+ * Check plugin dependencies.
+ */
+public function check_dependencies() {
+    // Check for WooCommerce
+    if (!class_exists('WooCommerce')) {
+        add_action('admin_notices', array($this, 'woocommerce_missing_notice'));
+        return;
     }
+
+    // Check for WooCommerce Memberships
+    if (!class_exists('WC_Memberships')) {
+        add_action('admin_notices', array($this, 'memberships_missing_notice'));
+        return;
+    }
+
+    // Check for WooCommerce Subscriptions
+    if (!class_exists('WC_Subscriptions')) {
+        add_action('admin_notices', array($this, 'subscriptions_missing_notice'));
+        return;
+    }
+}
 
     /**
      * Initialize the plugin.
