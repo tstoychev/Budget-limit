@@ -105,7 +105,7 @@ final class Membership_Discount_Budget {
      */
     private function init_hooks() {
         // Check if WooCommerce, WooCommerce Memberships, and WooCommerce Subscriptions are active
-        add_action('plugins_loaded', array($this, 'check_dependencies'));
+        add_action('plugins_loaded', array($this, 'check_dependencies'), 20);
         
         // Initialize plugin after WooCommerce is loaded
         add_action('woocommerce_loaded', array($this, 'init'));
