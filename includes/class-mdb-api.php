@@ -1,270 +1,370 @@
 <?php
 /**
- * API handler class
- * 
+ * REST API functionality.
+ *
  * @package Membership_Discount_Budget
  */
 
-// Exit if accessed directly
-if (!defined('ABSPATH')) {
-    exit;
-}
+defined('ABSPATH') || exit;
 
 /**
- * Handles API endpoints
+ * MDB_API Class.
  */
 class MDB_API {
-    
     /**
-     * Constructor
+     * Single instance of the class.
+     *
+     * @var MDB_API
+     */
+    protected static $_instance = null;
+
+    /**
+     * Main class instance.
+     *
+     * @return MDB_API
+     */
+    public static function instance() {
+        if (is_null(self::$_instance)) {
+            self::$_instance = new self();
+        }
+        return self::$_instance;
+    }
+
+    /**
+     * Constructor.
      */
     public function __construct() {
-        // Register REST API endpoints
-        add_action('rest_api_init', array($this, 'register_endpoints'));
+        $this->init_hooks();
     }
-    
+
     /**
-     * Register REST API endpoints
+     * Initialize hooks.
      */
-    public function register_endpoints() {
-        register_rest_route('membership-discount-budget/v1', '/budget', array(
+    private function init_hooks() {
+        add_action('rest_api_init', array($this, 'register_rest_routes'));
+        add_action('wp_ajax_mdb_export_csv', array($this, 'export_csv'));
+    }
+
+    /**
+     * Register REST API routes.
+     */
+    public function register_rest_routes() {
+        // Register customer endpoints
+        register_rest_route('mdb/v1', '/budget/current', array(
             'methods' => 'GET',
-            'callback' => array($this, 'get_user_budget'),
-            'permission_callback' => array($this, 'check_user_permission'),
+            'callback' => array($this, 'get_current_budget'),
+            'permission_callback' => array($this, 'customer_permissions_check'),
         ));
         
-        register_rest_route('membership-discount-budget/v1', '/budget/history', array(
+        register_rest_route('mdb/v1', '/budget/history', array(
             'methods' => 'GET',
             'callback' => array($this, 'get_budget_history'),
-            'permission_callback' => array($this, 'check_user_permission'),
+            'permission_callback' => array($this, 'customer_permissions_check'),
         ));
         
-        // Admin endpoints
-        register_rest_route('membership-discount-budget/v1', '/admin/budgets', array(
+        // Register admin endpoints
+        register_rest_route('mdb/v1', '/budgets', array(
             'methods' => 'GET',
             'callback' => array($this, 'get_all_budgets'),
-            'permission_callback' => array($this, 'check_admin_permission'),
+            'permission_callback' => array($this, 'admin_permissions_check'),
         ));
         
-        register_rest_route('membership-discount-budget/v1', '/admin/budget/(?P<id>\d+)', array(
+        register_rest_route('mdb/v1', '/budget/(?P<user_id>\d+)', array(
             'methods' => 'PUT',
-            'callback' => array($this, 'update_budget'),
-            'permission_callback' => array($this, 'check_admin_permission'),
+            'callback' => array($this, 'update_user_budget'),
+            'permission_callback' => array($this, 'admin_permissions_check'),
             'args' => array(
-                'remaining_budget' => array(
+                'user_id' => array(
                     'validate_callback' => function($param) {
-                        return is_numeric($param) && $param >= 0;
-                    }
+                        return is_numeric($param);
+                    },
                 ),
             ),
         ));
     }
-    
+
     /**
-     * Check if user has permission to access endpoint
+     * Check if user has customer permissions.
      *
      * @return bool
      */
-    public function check_user_permission() {
+    public function customer_permissions_check() {
         return is_user_logged_in();
     }
-    
+
     /**
-     * Check if user has admin permission
+     * Check if user has admin permissions.
      *
      * @return bool
      */
-    public function check_admin_permission() {
-        return current_user_can('manage_options');
+    public function admin_permissions_check() {
+        return current_user_can('manage_woocommerce');
     }
-    
+
     /**
-     * Get current user budget
+     * Get current budget endpoint.
      *
-     * @param WP_REST_Request $request Request object
-     * @return WP_REST_Response Response object
+     * @param WP_REST_Request $request Request object.
+     * @return WP_REST_Response|WP_Error
      */
-    public function get_user_budget($request) {
+    public function get_current_budget($request) {
         $user_id = get_current_user_id();
-        $budget = MDB()->budget->get_user_current_budget($user_id);
+        $budget = mdb_get_current_budget($user_id);
         
         if (!$budget) {
-            return new WP_REST_Response(array(
-                'success' => false,
-                'message' => __('No budget found for this user.', 'membership-discount-budget')
-            ), 404);
+            return new WP_Error('no_budget', __('No budget found for current user.', 'membership-discount-budget'), array('status' => 404));
         }
         
-        // Format budget data
         $budget_data = array(
-            'id' => $budget->id,
             'user_id' => $budget->user_id,
             'membership_id' => $budget->membership_id,
             'total_budget' => (float) $budget->total_budget,
             'used_amount' => (float) $budget->used_amount,
             'remaining_budget' => (float) $budget->remaining_budget,
-            'month' => $budget->month,
-            'year' => $budget->year,
+            'month' => (int) $budget->month,
+            'year' => (int) $budget->year,
             'created_at' => $budget->created_at,
             'updated_at' => $budget->updated_at,
-            'formatted' => array(
-                'total_budget' => wc_price($budget->total_budget),
-                'used_amount' => wc_price($budget->used_amount),
-                'remaining_budget' => wc_price($budget->remaining_budget),
-                'percentage_used' => $budget->total_budget > 0 ? round(($budget->used_amount / $budget->total_budget) * 100, 2) : 0,
-            )
+            'next_payment_date' => mdb_get_next_payment_date($user_id),
         );
         
-        return new WP_REST_Response(array(
-            'success' => true,
-            'budget' => $budget_data
-        ), 200);
+        return rest_ensure_response($budget_data);
     }
-    
+
     /**
-     * Get budget history
+     * Get budget history endpoint.
      *
-     * @param WP_REST_Request $request Request object
-     * @return WP_REST_Response Response object
+     * @param WP_REST_Request $request Request object.
+     * @return WP_REST_Response|WP_Error
      */
     public function get_budget_history($request) {
         global $wpdb;
         
         $user_id = get_current_user_id();
-        $limit = isset($request['limit']) ? intval($request['limit']) : 12;
-        $limit = min(24, max(1, $limit)); // Ensure limit is between 1 and 24
+        $table_name = $wpdb->prefix . 'membership_discount_budget';
         
-        $table = $wpdb->prefix . 'membership_discount_budget';
-        
-        // Get budget history
         $budgets = $wpdb->get_results($wpdb->prepare(
-            "SELECT * FROM $table WHERE user_id = %d ORDER BY year DESC, month DESC LIMIT %d",
-            $user_id, $limit
+            "SELECT * FROM {$table_name} WHERE user_id = %d ORDER BY year DESC, month DESC LIMIT 12",
+            $user_id
         ));
         
         if (empty($budgets)) {
-            return new WP_REST_Response(array(
-                'success' => false,
-                'message' => __('No budget history found for this user.', 'membership-discount-budget')
-            ), 404);
+            return new WP_Error('no_budgets', __('No budget history found for current user.', 'membership-discount-budget'), array('status' => 404));
         }
         
-        // Format budget data
-        $budget_history = array();
+        $budget_data = array();
         
         foreach ($budgets as $budget) {
-            $budget_data = array(
-                'id' => $budget->id,
+            $budget_data[] = array(
+                'user_id' => $budget->user_id,
+                'membership_id' => $budget->membership_id,
                 'total_budget' => (float) $budget->total_budget,
                 'used_amount' => (float) $budget->used_amount,
                 'remaining_budget' => (float) $budget->remaining_budget,
-                'month' => $budget->month,
-                'year' => $budget->year,
-                'month_name' => date('F', mktime(0, 0, 0, $budget->month, 1)),
-                'formatted' => array(
-                    'total_budget' => wc_price($budget->total_budget),
-                    'used_amount' => wc_price($budget->used_amount),
-                    'remaining_budget' => wc_price($budget->remaining_budget),
-                    'percentage_used' => $budget->total_budget > 0 ? round(($budget->used_amount / $budget->total_budget) * 100, 2) : 0,
-                )
+                'month' => (int) $budget->month,
+                'year' => (int) $budget->year,
+                'created_at' => $budget->created_at,
+                'updated_at' => $budget->updated_at,
             );
-            
-            $budget_history[] = $budget_data;
         }
         
-        return new WP_REST_Response(array(
-            'success' => true,
-            'history' => $budget_history
-        ), 200);
+        return rest_ensure_response($budget_data);
     }
-    
+
     /**
-     * Get all budgets (admin only)
+     * Get all budgets endpoint.
      *
-     * @param WP_REST_Request $request Request object
-     * @return WP_REST_Response Response object
+     * @param WP_REST_Request $request Request object.
+     * @return WP_REST_Response
      */
     public function get_all_budgets($request) {
         global $wpdb;
         
-        $month = isset($request['month']) ? intval($request['month']) : date('n');
-        $year = isset($request['year']) ? intval($request['year']) : date('Y');
+        $table_name = $wpdb->prefix . 'membership_discount_budget';
         
-        $table = $wpdb->prefix . 'membership_discount_budget';
+        // Get query parameters
+        $month = isset($request['month']) ? intval($request['month']) : current_time('n');
+        $year = isset($request['year']) ? intval($request['year']) : current_time('Y');
         
-        // Get all budgets for the specified month and year
         $budgets = $wpdb->get_results($wpdb->prepare(
-            "SELECT * FROM $table WHERE month = %d AND year = %d ORDER BY user_id ASC",
+            "SELECT b.*, u.display_name FROM {$table_name} AS b
+            LEFT JOIN {$wpdb->users} AS u ON b.user_id = u.ID
+            WHERE b.month = %d AND b.year = %d
+            ORDER BY b.user_id ASC",
             $month, $year
         ));
         
-        if (empty($budgets)) {
-            return new WP_REST_Response(array(
-                'success' => false,
-                'message' => __('No budgets found for this period.', 'membership-discount-budget')
-            ), 404);
-        }
-        
-        // Format budget data
         $budget_data = array();
         
         foreach ($budgets as $budget) {
             $user = get_user_by('id', $budget->user_id);
-            $membership = wc_memberships_get_user_membership($budget->membership_id);
+            $user_email = $user ? $user->user_email : '';
             
-            $budget_item = array(
+            $budget_data[] = array(
                 'id' => $budget->id,
                 'user_id' => $budget->user_id,
-                'user_name' => $user ? $user->display_name : __('Unknown User', 'membership-discount-budget'),
-                'user_email' => $user ? $user->user_email : '',
+                'user_name' => $budget->display_name,
+                'user_email' => $user_email,
                 'membership_id' => $budget->membership_id,
-                'membership_plan' => $membership ? get_the_title($membership->get_plan_id()) : __('Unknown Plan', 'membership-discount-budget'),
                 'total_budget' => (float) $budget->total_budget,
                 'used_amount' => (float) $budget->used_amount,
                 'remaining_budget' => (float) $budget->remaining_budget,
-                'month' => $budget->month,
-                'year' => $budget->year,
+                'month' => (int) $budget->month,
+                'year' => (int) $budget->year,
                 'created_at' => $budget->created_at,
                 'updated_at' => $budget->updated_at,
-                'formatted' => array(
-                    'total_budget' => wc_price($budget->total_budget),
-                    'used_amount' => wc_price($budget->used_amount),
-                    'remaining_budget' => wc_price($budget->remaining_budget),
-                    'percentage_used' => $budget->total_budget > 0 ? round(($budget->used_amount / $budget->total_budget) * 100, 2) : 0,
-                )
             );
-            
-            $budget_data[] = $budget_item;
         }
         
-        return new WP_REST_Response(array(
-            'success' => true,
-            'budgets' => $budget_data
-        ), 200);
+        return rest_ensure_response($budget_data);
     }
-    
+
     /**
-     * Update budget (admin only)
+     * Update user budget endpoint.
      *
-     * @param WP_REST_Request $request Request object
-     * @return WP_REST_Response Response object
+     * @param WP_REST_Request $request Request object.
+     * @return WP_REST_Response|WP_Error
      */
-    public function update_budget($request) {
-        $budget_id = $request['id'];
-        $new_budget = isset($request['remaining_budget']) ? floatval($request['remaining_budget']) : 0;
+    public function update_user_budget($request) {
+        $user_id = $request['user_id'];
+        $budget_data = $request->get_json_params();
         
-        $result = MDB()->budget->update_user_budget($budget_id, $new_budget);
+        if (!isset($budget_data['total_budget'])) {
+            return new WP_Error('missing_budget_amount', __('Total budget amount is required.', 'membership-discount-budget'), array('status' => 400));
+        }
+        
+        $budget = mdb_get_current_budget($user_id);
+        
+        if (!$budget) {
+            $membership_id = mdb_get_user_membership_id($user_id);
+            
+            if (!$membership_id) {
+                return new WP_Error('no_membership', __('User does not have an active membership.', 'membership-discount-budget'), array('status' => 400));
+            }
+            
+            $update_data = array(
+                'user_id' => $user_id,
+                'membership_id' => $membership_id,
+                'total_budget' => floatval($budget_data['total_budget']),
+                'used_amount' => isset($budget_data['used_amount']) ? floatval($budget_data['used_amount']) : 0,
+                'remaining_budget' => floatval($budget_data['total_budget']),
+            );
+        } else {
+            $remaining = max(0, floatval($budget_data['total_budget']) - $budget->used_amount);
+            
+            $update_data = array(
+                'id' => $budget->id,
+                'user_id' => $user_id,
+                'membership_id' => $budget->membership_id,
+                'total_budget' => floatval($budget_data['total_budget']),
+                'used_amount' => isset($budget_data['used_amount']) ? floatval($budget_data['used_amount']) : $budget->used_amount,
+                'remaining_budget' => $remaining,
+                'month' => $budget->month,
+                'year' => $budget->year,
+            );
+        }
+        
+        $result = mdb_update_budget($update_data);
         
         if (!$result) {
-            return new WP_REST_Response(array(
-                'success' => false,
-                'message' => __('Budget not found or could not be updated.', 'membership-discount-budget')
-            ), 404);
+            return new WP_Error('update_failed', __('Failed to update budget.', 'membership-discount-budget'), array('status' => 500));
         }
         
-        return new WP_REST_Response(array(
-            'success' => true,
-            'message' => __('Budget updated successfully.', 'membership-discount-budget')
-        ), 200);
+        $updated_budget = mdb_get_current_budget($user_id);
+        
+        $response_data = array(
+            'user_id' => $updated_budget->user_id,
+            'membership_id' => $updated_budget->membership_id,
+            'total_budget' => (float) $updated_budget->total_budget,
+            'used_amount' => (float) $updated_budget->used_amount,
+            'remaining_budget' => (float) $updated_budget->remaining_budget,
+            'month' => (int) $updated_budget->month,
+            'year' => (int) $updated_budget->year,
+            'created_at' => $updated_budget->created_at,
+            'updated_at' => $updated_budget->updated_at,
+        );
+        
+        return rest_ensure_response($response_data);
+    }
+
+    /**
+     * Export budget data as CSV.
+     */
+    public function export_csv() {
+        // Check admin permissions
+        if (!current_user_can('manage_woocommerce')) {
+            wp_die(__('You do not have permission to export data.', 'membership-discount-budget'));
+        }
+        
+        global $wpdb;
+        
+        $table_name = $wpdb->prefix . 'membership_discount_budget';
+        
+        // Get month and year from request
+        $month = isset($_GET['month']) ? intval($_GET['month']) : current_time('n');
+        $year = isset($_GET['year']) ? intval($_GET['year']) : current_time('Y');
+        
+        // Get budget data
+        $budgets = $wpdb->get_results($wpdb->prepare(
+            "SELECT b.*, u.display_name, u.user_email FROM {$table_name} AS b
+            LEFT JOIN {$wpdb->users} AS u ON b.user_id = u.ID
+            WHERE b.month = %d AND b.year = %d
+            ORDER BY b.user_id ASC",
+            $month, $year
+        ));
+        
+        // Set headers for CSV download
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename=discount-budgets-' . $year . '-' . $month . '.csv');
+        
+        // Create output stream
+        $output = fopen('php://output', 'w');
+        
+        // Add CSV headers
+        fputcsv($output, array(
+            __('User ID', 'membership-discount-budget'),
+            __('User Name', 'membership-discount-budget'),
+            __('User Email', 'membership-discount-budget'),
+            __('Membership Plan', 'membership-discount-budget'),
+            __('Total Budget', 'membership-discount-budget'),
+            __('Used Amount', 'membership-discount-budget'),
+            __('Remaining Budget', 'membership-discount-budget'),
+            __('Usage %', 'membership-discount-budget'),
+            __('Month', 'membership-discount-budget'),
+            __('Year', 'membership-discount-budget'),
+            __('Created At', 'membership-discount-budget'),
+            __('Updated At', 'membership-discount-budget'),
+        ));
+        
+        // Add data rows
+        foreach ($budgets as $budget) {
+            $plan_name = __('Unknown Plan', 'membership-discount-budget');
+            if (function_exists('wc_memberships_get_membership_plan')) {
+                $plan = wc_memberships_get_membership_plan($budget->membership_id);
+                if ($plan) {
+                    $plan_name = $plan->get_name();
+                }
+            }
+            
+            $usage_percent = $budget->total_budget > 0 ? ($budget->used_amount / $budget->total_budget) * 100 : 0;
+            
+            fputcsv($output, array(
+                $budget->user_id,
+                $budget->display_name,
+                $budget->user_email,
+                $plan_name,
+                $budget->total_budget,
+                $budget->used_amount,
+                $budget->remaining_budget,
+                sprintf('%.2f%%', $usage_percent),
+                date_i18n('F', strtotime("2023-{$budget->month}-01")),
+                $budget->year,
+                $budget->created_at,
+                $budget->updated_at,
+            ));
+        }
+        
+        fclose($output);
+        exit;
     }
 }
