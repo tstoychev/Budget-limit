@@ -6,9 +6,15 @@
 
     // Initialize admin scripts on document ready
     $(document).ready(function() {
+        if (typeof mdbL10n === 'undefined') {
+            console.error('Membership Discount Budget: mdbL10n localization object not defined');
+            return;
+        }
+        
         // Edit budget modal
         $('.mdb-edit-budget').on('click', function(e) {
             e.preventDefault();
+            console.log('Edit budget clicked');
             
             var userId = $(this).data('user');
             var currentBudget = $(this).data('budget');
@@ -26,7 +32,7 @@
                     '</div>' +
                     '<input type="hidden" name="mdb_user_id" id="mdb-user-id" value="">' +
                     '<input type="hidden" name="mdb_edit_budget" value="1">' +
-                    wp.template('wp-nonce') +
+                    '<input type="hidden" name="_wpnonce" value="' + mdbL10n.nonce + '">' +
                     '<div class="mdb-modal-actions">' +
                     '<button type="button" class="button mdb-modal-cancel">' + mdbL10n.cancel + '</button>' +
                     '<button type="submit" class="button button-primary">' + mdbL10n.save + '</button>' +
@@ -54,15 +60,9 @@
             $('#mdb-user-id').val(userId);
             $('#mdb-budget-amount').val(currentBudget);
             
-            // Update nonce
-            $('#mdb-edit-budget-form input[name="_wpnonce"]').val(
-                wp.ajax.settings.nonce || ''
-            );
+            // Update nonce field
             $('#mdb-edit-budget-form input[name="_wpnonce"]').attr(
                 'id', '_wpnonce-mdb-edit-budget-' + userId
-            );
-            $('#mdb-edit-budget-form input[name="_wpnonce"]').attr(
-                'name', '_wpnonce'
             );
             
             // Show modal
@@ -72,6 +72,7 @@
         // Reset budget action
         $('.mdb-reset-budget').on('click', function(e) {
             e.preventDefault();
+            console.log('Reset budget clicked');
             
             var userId = $(this).data('user');
             
@@ -80,7 +81,7 @@
                 var form = $('<form method="post"></form>');
                 form.append('<input type="hidden" name="bulk-reset" value="1">');
                 form.append('<input type="hidden" name="budget[]" value="' + userId + '">');
-                form.append(wp.template('wp-nonce'));
+                form.append('<input type="hidden" name="_wpnonce" value="' + mdbL10n.nonce + '">');
                 $('body').append(form);
                 form.submit();
             }
