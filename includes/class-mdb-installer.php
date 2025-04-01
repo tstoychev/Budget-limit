@@ -1,100 +1,155 @@
 <?php
 /**
- * Installer class
- * 
- * @package Membership_Discount_Budget
+ * Installer Class
+ *
+ * Handles plugin installation and updates
+ *
+ * @package Membership Discount Budget
  */
 
 // Exit if accessed directly
-if (!defined('ABSPATH')) {
+if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
 /**
- * Handles installation and updates
+ * MDB_Installer Class
  */
 class MDB_Installer {
-    
+
+    /**
+     * DB Table name
+     *
+     * @var string
+     */
+    private $table_name;
+
+    /**
+     * Constructor
+     */
+    public function __construct() {
+        global $wpdb;
+        $this->table_name = $wpdb->prefix . 'membership_discount_budget';
+        
+        // Add upgrade routine if needed
+        add_action( 'plugins_loaded', array( $this, 'check_update' ), 30 );
+    }
+
+    /**
+     * Install the plugin
+     */
+    public function install() {
+        // Create the database table
+        $this->create_tables();
+        
+        // Add default options
+        $this->add_default_options();
+        
+        // Set the installed version
+        update_option( 'mdb_version', MDB_VERSION );
+        
+        // Flush rewrite rules
+        flush_rewrite_rules();
+    }
+
     /**
      * Create database tables
      */
-    public function create_tables() {
+    private function create_tables() {
         global $wpdb;
-        
-        $table_name = $wpdb->prefix . 'membership_discount_budget';
         
         $charset_collate = $wpdb->get_charset_collate();
         
-        $sql = "CREATE TABLE $table_name (
+        $sql = "CREATE TABLE {$this->table_name} (
             id bigint(20) NOT NULL AUTO_INCREMENT,
             user_id bigint(20) NOT NULL,
             membership_id bigint(20) NOT NULL,
-            total_budget decimal(10,2) NOT NULL DEFAULT 0.00,
-            used_amount decimal(10,2) NOT NULL DEFAULT 0.00,
-            remaining_budget decimal(10,2) NOT NULL DEFAULT 0.00,
+            total_budget decimal(10,2) NOT NULL DEFAULT 0,
+            used_amount decimal(10,2) NOT NULL DEFAULT 0,
+            remaining_budget decimal(10,2) NOT NULL DEFAULT 0,
             month int(2) NOT NULL,
             year int(4) NOT NULL,
-            created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            PRIMARY KEY (id),
+            created_at datetime NOT NULL,
+            updated_at datetime NOT NULL,
+            PRIMARY KEY  (id),
             KEY user_id (user_id),
             KEY membership_id (membership_id),
             KEY month_year (month, year),
             KEY user_month_year (user_id, month, year)
         ) $charset_collate;";
         
-        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
-        dbDelta($sql);
-        
-        // Store table version
-        update_option('mdb_db_version', MDB_VERSION);
+        require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
+        dbDelta( $sql );
     }
-    
+
     /**
-     * Update plugin if needed
+     * Add default options
      */
-    public function update_if_needed() {
-        $current_version = get_option('mdb_version', '0.0.0');
+    private function add_default_options() {
+        // Add default settings
+        $default_settings = array(
+            'monthly_budget' => 300.00,
+            'discount_percentage' => 20,
+            'eligible_membership_plans' => array(),
+            'debug_mode' => 'no',
+            'display_budget_on_account' => 'yes',
+            'display_budget_on_cart' => 'yes',
+            'low_budget_threshold_percentage' => 10,
+        );
         
-        // If the versions match, no need to update
-        if (version_compare($current_version, MDB_VERSION, '==')) {
-            return;
+        update_option( 'mdb_settings', $default_settings );
+    }
+
+    /**
+     * Check for updates
+     */
+    public function check_update() {
+        $installed_version = get_option( 'mdb_version' );
+        
+        // If installed version is different from current version, run updates
+        if ( $installed_version != MDB_VERSION ) {
+            $this->update( $installed_version );
+        }
+    }
+
+    /**
+     * Update the plugin
+     *
+     * @param string $installed_version The currently installed version
+     */
+    private function update( $installed_version ) {
+        // Run different updates based on version
+        if ( version_compare( $installed_version, '1.0.0', '<' ) ) {
+            // Perform update for versions less than 1.0.0
+            $this->create_tables();
         }
         
-        // Run update routines based on version
-        if (version_compare($current_version, '1.0.0', '<')) {
-            $this->update_to_1_0_0();
+        // Always update the version number
+        update_option( 'mdb_version', MDB_VERSION );
+    }
+
+    /**
+     * Uninstall the plugin
+     */
+    public static function uninstall() {
+        // If uninstall not called from WordPress, exit
+        if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
+            exit;
         }
         
-        if (version_compare($current_version, '1.1.0', '<')) {
-            $this->update_to_1_1_0();
-        }
-        
-        // Update version number
-        update_option('mdb_version', MDB_VERSION);
-    }
-    
-    /**
-     * Update to version 1.0.0
-     */
-    private function update_to_1_0_0() {
-        // Initial version, no updates needed
-    }
-    
-    /**
-     * Update to version 1.1.0
-     */
-    private function update_to_1_1_0() {
         global $wpdb;
         
-        $table_name = $wpdb->prefix . 'membership_discount_budget';
+        // Delete the database table
+        $wpdb->query( "DROP TABLE IF EXISTS {$wpdb->prefix}membership_discount_budget" );
         
-        // Check if additional indexes need to be added
-        $results = $wpdb->get_results("SHOW INDEX FROM $table_name WHERE Key_name IN ('user_id', 'membership_id', 'month_year')");
+        // Delete options
+        delete_option( 'mdb_settings' );
+        delete_option( 'mdb_version' );
         
-        if (empty($results)) {
-            // Add the additional indexes for better performance
-            $wpdb->query("ALTER TABLE $table_name ADD INDEX user_id (user_id), ADD INDEX membership_id (membership_id), ADD INDEX month_year (month, year)");
-        }
+        // Clear any cached data that has been removed
+        wp_cache_flush();
     }
 }
+
+// Register uninstall hook
+register_uninstall_hook( MDB_PLUGIN_BASENAME, array( 'MDB_Installer', 'uninstall' ) );
