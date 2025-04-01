@@ -1,49 +1,162 @@
 <?php
 /**
- * Helper Functions
+ * Helper functions for the plugin.
  *
- * @package Membership Discount Budget
+ * @package Membership_Discount_Budget
  */
 
-// Exit if accessed directly
-if ( ! defined( 'ABSPATH' ) ) {
-    exit;
+defined('ABSPATH') || exit;
+
+/**
+ * Get the current user's budget for this month.
+ *
+ * @param int $user_id Optional. User ID to check. Defaults to current user.
+ * @return object|null Budget object or null if not found.
+ */
+function mdb_get_current_budget($user_id = 0) {
+    if (!$user_id) {
+        $user_id = get_current_user_id();
+    }
+
+    if (!$user_id) {
+        return null;
+    }
+
+    $budget = mdb_get_user_budget($user_id, current_time('n'), current_time('Y'));
+    
+    return $budget;
 }
 
 /**
- * Get plugin settings
+ * Get a user's budget for a specific month and year.
  *
- * @param string $key Optional. Setting key to retrieve.
- * @return mixed
+ * @param int $user_id User ID.
+ * @param int $month Month number (1-12).
+ * @param int $year Year.
+ * @return object|null Budget object or null if not found.
  */
-function mdb_get_settings( $key = '' ) {
-    $settings = get_option( 'mdb_settings', array() );
+function mdb_get_user_budget($user_id, $month, $year) {
+    global $wpdb;
+
+    $table_name = $wpdb->prefix . 'membership_discount_budget';
     
-    if ( ! empty( $key ) ) {
-        return isset( $settings[ $key ] ) ? $settings[ $key ] : null;
+    $budget = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM {$table_name} WHERE user_id = %d AND month = %d AND year = %d",
+        $user_id, $month, $year
+    ));
+    
+    return $budget;
+}
+
+/**
+ * Create or update a user's budget.
+ *
+ * @param array $data Budget data.
+ * @return int|false The number of rows updated, or false on error.
+ */
+function mdb_update_budget($data) {
+    global $wpdb;
+
+    $table_name = $wpdb->prefix . 'membership_discount_budget';
+    
+    $defaults = array(
+        'user_id'           => 0,
+        'membership_id'     => 0,
+        'total_budget'      => get_option('mdb_monthly_budget', 300),
+        'used_amount'       => 0,
+        'remaining_budget'  => get_option('mdb_monthly_budget', 300),
+        'month'             => current_time('n'),
+        'year'              => current_time('Y'),
+        'created_at'        => current_time('mysql'),
+        'updated_at'        => current_time('mysql'),
+    );
+    
+    $data = wp_parse_args($data, $defaults);
+    
+    // Check if record exists
+    $exists = $wpdb->get_var($wpdb->prepare(
+        "SELECT id FROM {$table_name} WHERE user_id = %d AND month = %d AND year = %d",
+        $data['user_id'], $data['month'], $data['year']
+    ));
+    
+    if ($exists) {
+        // Update
+        $data['updated_at'] = current_time('mysql');
+        
+        $result = $wpdb->update(
+            $table_name,
+            $data,
+            array(
+                'id' => $exists,
+            ),
+            array(
+                '%d', // user_id
+                '%d', // membership_id
+                '%f', // total_budget
+                '%f', // used_amount
+                '%f', // remaining_budget
+                '%d', // month
+                '%d', // year
+                '%s', // created_at
+                '%s', // updated_at
+            ),
+            array('%d')
+        );
+    } else {
+        // Insert
+        $result = $wpdb->insert(
+            $table_name,
+            $data,
+            array(
+                '%d', // user_id
+                '%d', // membership_id
+                '%f', // total_budget
+                '%f', // used_amount
+                '%f', // remaining_budget
+                '%d', // month
+                '%d', // year
+                '%s', // created_at
+                '%s', // updated_at
+            )
+        );
     }
     
-    return $settings;
+    return $result;
 }
 
 /**
- * Check if user has active membership
+ * Calculate the discount amount for a product.
  *
- * @param int $user_id User ID
- * @return bool
+ * @param float $price Product price.
+ * @return float The discount amount.
  */
-function mdb_user_has_active_membership( $user_id ) {
-    // Check if WC Memberships is active
-    if ( ! function_exists( 'wc_memberships_get_user_memberships' ) ) {
+function mdb_calculate_discount_amount($price) {
+    $discount_percentage = get_option('mdb_discount_percentage', 20);
+    $discount_amount = ($price * $discount_percentage) / 100;
+    return round($discount_amount, 2);
+}
+
+/**
+ * Check if user has an active membership.
+ *
+ * @param int $user_id User ID.
+ * @return bool True if user has active membership, false otherwise.
+ */
+function mdb_user_has_membership($user_id = 0) {
+    if (!$user_id) {
+        $user_id = get_current_user_id();
+    }
+
+    if (!$user_id || !function_exists('wc_memberships_is_user_active_member')) {
         return false;
     }
+
+    // Get all active membership plans
+    $membership_plans = wc_memberships_get_membership_plans();
     
-    // Get user memberships
-    $memberships = wc_memberships_get_user_memberships( $user_id );
-    
-    // Check if there are any active memberships
-    foreach ( $memberships as $membership ) {
-        if ( $membership->has_status( 'active' ) ) {
+    // Check if user is an active member of any plan
+    foreach ($membership_plans as $plan) {
+        if (wc_memberships_is_user_active_member($user_id, $plan->get_id())) {
             return true;
         }
     }
@@ -52,224 +165,54 @@ function mdb_user_has_active_membership( $user_id ) {
 }
 
 /**
- * Get active membership plans that are eligible for discount budget
+ * Get user's membership ID.
  *
- * @return array
+ * @param int $user_id User ID.
+ * @return int|false Membership ID or false if not found.
  */
-function mdb_get_eligible_membership_plans() {
-    $eligible_plans = mdb_get_settings( 'eligible_membership_plans' );
-    
-    if ( empty( $eligible_plans ) ) {
-        // If no plans are specified, include all plans
-        $plans = wc_memberships_get_membership_plans();
-        $eligible_plans = wp_list_pluck( $plans, 'id' );
+function mdb_get_user_membership_id($user_id = 0) {
+    if (!$user_id) {
+        $user_id = get_current_user_id();
     }
-    
-    return $eligible_plans;
-}
 
-/**
- * Check if user has eligible membership for discount budget
- *
- * @param int $user_id User ID
- * @return bool|object False if no eligible membership, otherwise returns the membership object
- */
-function mdb_user_has_eligible_membership( $user_id ) {
-    // Check if WC Memberships is active
-    if ( ! function_exists( 'wc_memberships_get_user_memberships' ) ) {
+    if (!$user_id || !function_exists('wc_memberships_get_user_memberships')) {
         return false;
     }
+
+    $memberships = wc_memberships_get_user_memberships($user_id, array('status' => 'active'));
     
-    // Get eligible membership plans
-    $eligible_plans = mdb_get_eligible_membership_plans();
-    
-    // Get user memberships
-    $memberships = wc_memberships_get_user_memberships( $user_id );
-    
-    // Check if there are any active eligible memberships
-    foreach ( $memberships as $membership ) {
-        if ( $membership->has_status( 'active' ) && in_array( $membership->get_plan_id(), $eligible_plans ) ) {
-            return $membership;
-        }
+    if (!empty($memberships)) {
+        $membership = reset($memberships);
+        return $membership->get_id();
     }
     
     return false;
 }
 
 /**
- * Get user's current discount budget
+ * Get next subscription payment date for a user.
  *
- * @param int $user_id User ID
- * @return object|bool Budget object or false if no budget found
+ * @param int $user_id User ID.
+ * @return string|false Next payment date or false if not found.
  */
-function mdb_get_user_current_budget( $user_id ) {
-    global $wpdb;
-    
-    $current_month = date( 'n' );
-    $current_year = date( 'Y' );
-    
-    // Get current budget
-    $budget = $wpdb->get_row( $wpdb->prepare(
-        "SELECT * FROM {$wpdb->prefix}membership_discount_budget 
-        WHERE user_id = %d AND month = %d AND year = %d 
-        ORDER BY id DESC LIMIT 1",
-        $user_id, $current_month, $current_year
-    ) );
-    
-    return $budget;
-}
-
-/**
- * Get or create user's current budget
- *
- * @param int $user_id User ID
- * @return object|bool Budget object or false if no eligible membership
- */
-function mdb_get_or_create_user_budget( $user_id ) {
-    // Check if user has current budget
-    $budget = mdb_get_user_current_budget( $user_id );
-    
-    if ( $budget ) {
-        return $budget;
+function mdb_get_next_payment_date($user_id = 0) {
+    if (!$user_id) {
+        $user_id = get_current_user_id();
     }
-    
-    // No budget exists, check if user has eligible membership
-    $membership = mdb_user_has_eligible_membership( $user_id );
-    
-    if ( ! $membership ) {
+
+    if (!$user_id || !class_exists('WC_Subscriptions')) {
         return false;
     }
-    
-    // Create new budget
-    $budget_obj = new MDB_Budget();
-    $new_budget = $budget_obj->create_user_budget( $user_id, $membership->get_id() );
-    
-    return $new_budget;
-}
 
-/**
- * Calculate discount amount for an order
- *
- * @param WC_Order $order Order object
- * @return float Discount amount
- */
-function mdb_calculate_order_discount_amount( $order ) {
-    $discount_amount = 0;
-    $discount_percentage = mdb_get_settings( 'discount_percentage' );
+    $subscriptions = wcs_get_users_subscriptions($user_id);
+    $next_payment = false;
     
-    // Calculate discount from each line item
-    foreach ( $order->get_items() as $item ) {
-        $line_subtotal = $item->get_subtotal();
-        $item_discount = ( $line_subtotal * $discount_percentage ) / 100;
-        $discount_amount += $item_discount;
-    }
-    
-    return round( $discount_amount, 2 );
-}
-
-/**
- * Format price for display
- *
- * @param float $price Price to format
- * @return string Formatted price
- */
-function mdb_format_price( $price ) {
-    return wc_price( $price );
-}
-
-/**
- * Check if budget is low
- *
- * @param object $budget Budget object
- * @return bool
- */
-function mdb_is_budget_low( $budget ) {
-    $threshold_percentage = mdb_get_settings( 'low_budget_threshold_percentage' );
-    
-    if ( ! $threshold_percentage ) {
-        $threshold_percentage = 10;
-    }
-    
-    // Calculate threshold amount
-    $threshold_amount = ( $budget->total_budget * $threshold_percentage ) / 100;
-    
-    // Check if remaining budget is less than threshold
-    return ( $budget->remaining_budget <= $threshold_amount );
-}
-
-/**
- * Get next subscription payment date
- *
- * @param int $user_id User ID
- * @return string|bool Next payment date or false if no subscription
- */
-function mdb_get_next_subscription_payment_date( $user_id ) {
-    // Check if WC Subscriptions is active
-    if ( ! function_exists( 'wcs_get_users_subscriptions' ) ) {
-        return false;
-    }
-    
-    // Get user's active subscriptions
-    $subscriptions = wcs_get_users_subscriptions( $user_id );
-    
-    foreach ( $subscriptions as $subscription ) {
-        if ( $subscription->has_status( 'active' ) ) {
-            $next_payment = $subscription->get_date( 'next_payment' );
-            
-            if ( ! empty( $next_payment ) ) {
-                return $next_payment;
-            }
+    foreach ($subscriptions as $subscription) {
+        if ($subscription->get_status() === 'active') {
+            $next_payment = $subscription->get_date('next_payment');
+            break;
         }
     }
     
-    return false;
-}
-
-/**
- * Get membership discount percentage
- *
- * @return float Discount percentage
- */
-function mdb_get_discount_percentage() {
-    return (float) mdb_get_settings( 'discount_percentage' );
-}
-
-/**
- * Get total monthly budget amount
- *
- * @return float Budget amount
- */
-function mdb_get_monthly_budget_amount() {
-    return (float) mdb_get_settings( 'monthly_budget' );
-}
-
-/**
- * Check if a product is eligible for discount
- *
- * @param int $product_id Product ID
- * @return bool
- */
-function mdb_is_product_eligible_for_discount( $product_id ) {
-    // By default, all products are eligible
-    // You can add custom logic here to exclude certain products
-    
-    $is_eligible = true;
-    
-    // Allow filtering product eligibility
-    return apply_filters( 'mdb_product_eligible_for_discount', $is_eligible, $product_id );
-}
-
-/**
- * Log debug messages
- *
- * @param string $message Message to log
- */
-function mdb_log( $message ) {
-    if ( 'yes' === mdb_get_settings( 'debug_mode' ) ) {
-        if ( is_array( $message ) || is_object( $message ) ) {
-            $message = print_r( $message, true );
-        }
-        
-        error_log( 'MDB: ' . $message );
-    }
+    return $next_payment;
 }
