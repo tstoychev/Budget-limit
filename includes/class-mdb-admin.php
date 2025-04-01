@@ -481,12 +481,25 @@ public function register_settings() {
             MDB_VERSION
         );
         
-        wp_enqueue_script(
+        wp_register_script(
             'mdb-admin-scripts',
             MDB_PLUGIN_URL . 'assets/js/admin.js',
-            array('jquery'),
+            array('jquery', 'wp-util'),
             MDB_VERSION,
             true
         );
+        // Add localization for JavaScript
+    wp_localize_script('mdb-admin-scripts', 'mdbL10n', array(
+        'edit_budget' => __('Edit Budget', 'membership-discount-budget'),
+        'budget_amount' => __('Budget Amount', 'membership-discount-budget'),
+        'cancel' => __('Cancel', 'membership-discount-budget'),
+        'save' => __('Save', 'membership-discount-budget'),
+        'confirm_reset' => __('Are you sure you want to reset this budget?', 'membership-discount-budget'),
+        'ajax_url' => admin_url('admin-ajax.php'),
+        'nonce' => wp_create_nonce('mdb-admin-nonce')
+    ));
+    
+    // Enqueue the script after localization
+    wp_enqueue_script('mdb-admin-scripts');
     }
 }
