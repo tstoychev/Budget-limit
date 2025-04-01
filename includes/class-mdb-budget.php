@@ -136,80 +136,87 @@ class MDB_Budget {
      * @param WC_Order $order Order.
      */
     public function add_discount_data_to_order_item($item, $cart_item_key, $values, $order) {
-        $product_id = $item->get_product_id();
-        $discount_data = WC()->session->get('product_' . $product_id . '_discount');
+    $product_id = $item->get_product_id();
+    $discount_data = WC()->session->get('product_' . $product_id . '_discount');
+    
+    if ($discount_data) {
+        // HPOS compatible way to add meta data
+        $item->update_meta_data('_mdb_original_price', $discount_data['original_price']);
+        $item->update_meta_data('_mdb_discount_amount', $discount_data['discount_amount']);
+        $item->update_meta_data('_mdb_discounted_price', $discount_data['discounted_price']);
+        $item->save_meta_data(); // Save meta data
         
-        if ($discount_data) {
-            $item->add_meta_data('_mdb_original_price', $discount_data['original_price']);
-            $item->add_meta_data('_mdb_discount_amount', $discount_data['discount_amount']);
-            $item->add_meta_data('_mdb_discounted_price', $discount_data['discounted_price']);
-            
-            // Clear session data
-            WC()->session->__unset('product_' . $product_id . '_discount');
-        }
+        // Clear session data
+        WC()->session->__unset('product_' . $product_id . '_discount');
     }
+}
 
     /**
      * Process completed order to update budget usage.
      *
      * @param int $order_id Order ID.
      */
-    public function process_completed_order($order_id) {
-        // Get order
-        $order = wc_get_order($order_id);
+    /**
+ * Process completed order to update budget usage.
+ *
+ * @param int $order_id Order ID.
+ */
+public function process_completed_order($order_id) {
+    // Get order - HPOS compatible way
+    $order = wc_get_order($order_id);
+    
+    if (!$order) {
+        return;
+    }
+    
+    // Get customer ID - HPOS compatible
+    $user_id = $order->get_customer_id();
+    
+    if (!$user_id || !mdb_user_has_membership($user_id)) {
+        return;
+    }
+    
+    // Get current budget
+    $budget = mdb_get_user_budget($user_id, current_time('n'), current_time('Y'));
+    
+    if (!$budget) {
+        return;
+    }
+    
+    // Calculate total discount used in this order
+    $total_discount = 0;
+    
+    foreach ($order->get_items() as $item) {
+        $discount_amount = $item->get_meta('_mdb_discount_amount');
         
-        if (!$order) {
-            return;
-        }
-        
-        // Get customer ID
-        $user_id = $order->get_customer_id();
-        
-        if (!$user_id || !mdb_user_has_membership($user_id)) {
-            return;
-        }
-        
-        // Get current budget
-        $budget = mdb_get_user_budget($user_id, current_time('n'), current_time('Y'));
-        
-        if (!$budget) {
-            return;
-        }
-        
-        // Calculate total discount used in this order
-        $total_discount = 0;
-        
-        foreach ($order->get_items() as $item) {
-            $discount_amount = $item->get_meta('_mdb_discount_amount');
-            
-            if ($discount_amount) {
-                $quantity = $item->get_quantity();
-                $total_discount += ($discount_amount * $quantity);
-            }
-        }
-        
-        if ($total_discount > 0) {
-            // Update budget usage
-            $new_used_amount = $budget->used_amount + $total_discount;
-            $new_remaining_budget = max(0, $budget->total_budget - $new_used_amount);
-            
-            mdb_update_budget(array(
-                'id' => $budget->id,
-                'user_id' => $user_id,
-                'membership_id' => $budget->membership_id,
-                'total_budget' => $budget->total_budget,
-                'used_amount' => $new_used_amount,
-                'remaining_budget' => $new_remaining_budget,
-                'month' => $budget->month,
-                'year' => $budget->year,
-            ));
-            
-            // Add budget usage to order meta
-            $order->add_meta_data('_mdb_discount_used', $total_discount);
-            $order->add_meta_data('_mdb_remaining_budget', $new_remaining_budget);
-            $order->save();
+        if ($discount_amount) {
+            $quantity = $item->get_quantity();
+            $total_discount += ($discount_amount * $quantity);
         }
     }
+    
+    if ($total_discount > 0) {
+        // Update budget usage
+        $new_used_amount = $budget->used_amount + $total_discount;
+        $new_remaining_budget = max(0, $budget->total_budget - $new_used_amount);
+        
+        mdb_update_budget(array(
+            'id' => $budget->id,
+            'user_id' => $user_id,
+            'membership_id' => $budget->membership_id,
+            'total_budget' => $budget->total_budget,
+            'used_amount' => $new_used_amount,
+            'remaining_budget' => $new_remaining_budget,
+            'month' => $budget->month,
+            'year' => $budget->year,
+        ));
+        
+        // Add budget usage to order meta - HPOS compatible
+        $order->update_meta_data('_mdb_discount_used', $total_discount);
+        $order->update_meta_data('_mdb_remaining_budget', $new_remaining_budget);
+        $order->save();
+    }
+}
 
     /**
      * Clear cache after order save for HPOS compatibility.
