@@ -16,6 +16,13 @@
  * @package Membership_Discount_Budget
  */
 
+// Declare HPOS compatibility - Add this right after the header
+add_action('before_woocommerce_init', function() {
+    if (class_exists('\Automattic\WooCommerce\Utilities\FeaturesUtil')) {
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('custom_order_tables', __FILE__, true);
+    }
+});
+
 defined('ABSPATH') || exit;
 
 /**
