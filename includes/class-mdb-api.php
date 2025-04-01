@@ -81,6 +81,26 @@ class MDB_API {
                 ),
             ),
         ));
+        
+        // Register order endpoints
+        register_rest_route('mdb/v1', '/orders/(?P<order_id>\d+)', array(
+            'methods' => 'GET',
+            'callback' => array($this, 'get_order_details_endpoint'),
+            'permission_callback' => array($this, 'customer_permissions_check'),
+            'args' => array(
+                'order_id' => array(
+                    'validate_callback' => function($param) {
+                        return is_numeric($param);
+                    },
+                ),
+            ),
+        ));
+
+        register_rest_route('mdb/v1', '/orders', array(
+            'methods' => 'GET',
+            'callback' => array($this, 'get_user_orders_with_budget'),
+            'permission_callback' => array($this, 'customer_permissions_check'),
+        ));
     }
 
     /**
@@ -285,6 +305,92 @@ class MDB_API {
         );
         
         return rest_ensure_response($response_data);
+    }
+
+    /**
+     * Get order details.
+     *
+     * @param int $order_id Order ID.
+     * @return array Order data.
+     */
+    public function get_order_details($order_id) {
+        // HPOS compatible way to get order
+        $order = wc_get_order($order_id);
+        
+        if (!$order) {
+            return array();
+        }
+        
+        // HPOS compatible way to get meta data
+        $discount_used = $order->get_meta('_mdb_discount_used');
+        $remaining_budget = $order->get_meta('_mdb_remaining_budget');
+        
+        $order_data = array(
+            'id' => $order->get_id(),
+            'date_created' => $order->get_date_created()->format('Y-m-d H:i:s'),
+            'status' => $order->get_status(),
+            'customer_id' => $order->get_customer_id(),
+            'total' => $order->get_total(),
+            'discount_used' => $discount_used,
+            'remaining_budget' => $remaining_budget,
+        );
+        
+        return $order_data;
+    }
+    
+    /**
+     * Get order details endpoint.
+     *
+     * @param WP_REST_Request $request Request object.
+     * @return WP_REST_Response|WP_Error
+     */
+    public function get_order_details_endpoint($request) {
+        $order_id = $request['order_id'];
+        $order = wc_get_order($order_id);
+        
+        if (!$order) {
+            return new WP_Error('no_order', __('Order not found.', 'membership-discount-budget'), array('status' => 404));
+        }
+        
+        // Check if order belongs to current user
+        $user_id = get_current_user_id();
+        if ($order->get_customer_id() !== $user_id && !current_user_can('manage_woocommerce')) {
+            return new WP_Error('forbidden', __('You do not have permission to view this order.', 'membership-discount-budget'), array('status' => 403));
+        }
+        
+        $order_data = $this->get_order_details($order_id);
+        
+        return rest_ensure_response($order_data);
+    }
+
+    /**
+     * Get user orders with budget usage endpoint.
+     *
+     * @param WP_REST_Request $request Request object.
+     * @return WP_REST_Response|WP_Error
+     */
+    public function get_user_orders_with_budget($request) {
+        $user_id = get_current_user_id();
+        
+        // HPOS compatible way to get orders
+        $orders = wc_get_orders(array(
+            'customer' => $user_id,
+            'limit' => 10,
+            'meta_key' => '_mdb_discount_used',
+            'meta_compare' => 'EXISTS',
+        ));
+        
+        if (empty($orders)) {
+            return new WP_Error('no_orders', __('No orders found with budget usage.', 'membership-discount-budget'), array('status' => 404));
+        }
+        
+        $order_data = array();
+        
+        foreach ($orders as $order) {
+            $order_data[] = $this->get_order_details($order->get_id());
+        }
+        
+        return rest_ensure_response($order_data);
     }
 
     /**
