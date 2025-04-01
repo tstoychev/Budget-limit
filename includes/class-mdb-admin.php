@@ -103,57 +103,59 @@ class MDB_Admin {
     /**
      * Register plugin settings.
      */
-    public function register_settings() {
-        register_setting('mdb_settings', 'mdb_monthly_budget', array(
-            'type' => 'number',
-            'sanitize_callback' => 'floatval',
-            'default' => 300,
-        ));
-        
-        register_setting('mdb_settings', 'mdb_discount_percentage', array(
-            ''type' => 'number',
-            'sanitize_callback' => 'intval',
-            'default' => 20,
-        ));
-        
-        register_setting('mdb_settings', 'mdb_debug_mode', array(
-            'type' => 'boolean',
-            'sanitize_callback' => function($value) { return (bool) $value; },
-            'default' => false,
-        ));
-        
-        add_settings_section(
-            'mdb_general_settings',
-            __('General Settings', 'membership-discount-budget'),
-            array($this, 'general_settings_section_callback'),
-            'mdb_settings'
-        );
-        
-        add_settings_field(
-            'mdb_monthly_budget',
-            __('Monthly Budget Amount (BGN)', 'membership-discount-budget'),
-            array($this, 'monthly_budget_callback'),
-            'mdb_settings',
-            'mdb_general_settings'
-        );
-        
-        add_settings_field(
-            'mdb_discount_percentage',
-            __('Discount Percentage (%)', 'membership-discount-budget'),
-            array($this, 'discount_percentage_callback'),
-            'mdb_settings',
-            'mdb_general_settings'
-        );
-        
-        add_settings_field(
-            'mdb_debug_mode',
-            __('Debug Mode', 'membership-discount-budget'),
-            array($this, 'debug_mode_callback'),
-            'mdb_settings',
-            'mdb_general_settings'
-        );
-    }
-
+    /**
+ * Register plugin settings.
+ */
+public function register_settings() {
+    register_setting('mdb_settings', 'mdb_monthly_budget', array(
+        'type' => 'number',
+        'sanitize_callback' => 'floatval',
+        'default' => 300
+    ));
+    
+    register_setting('mdb_settings', 'mdb_discount_percentage', array(
+        'type' => 'number',
+        'sanitize_callback' => 'intval',
+        'default' => 20
+    ));
+    
+    register_setting('mdb_settings', 'mdb_debug_mode', array(
+        'type' => 'boolean',
+        'sanitize_callback' => function($value) { return (bool) $value; },
+        'default' => false
+    ));
+    
+    add_settings_section(
+        'mdb_general_settings',
+        __('General Settings', 'membership-discount-budget'),
+        array($this, 'general_settings_section_callback'),
+        'mdb_settings'
+    );
+    
+    add_settings_field(
+        'mdb_monthly_budget',
+        __('Monthly Budget Amount (BGN)', 'membership-discount-budget'),
+        array($this, 'monthly_budget_callback'),
+        'mdb_settings',
+        'mdb_general_settings'
+    );
+    
+    add_settings_field(
+        'mdb_discount_percentage',
+        __('Discount Percentage (%)', 'membership-discount-budget'),
+        array($this, 'discount_percentage_callback'),
+        'mdb_settings',
+        'mdb_general_settings'
+    );
+    
+    add_settings_field(
+        'mdb_debug_mode',
+        __('Debug Mode', 'membership-discount-budget'),
+        array($this, 'debug_mode_callback'),
+        'mdb_settings',
+        'mdb_general_settings'
+    );
+}
     /**
      * General settings section callback.
      */
