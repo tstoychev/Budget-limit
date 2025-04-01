@@ -216,3 +216,20 @@ function mdb_get_next_payment_date($user_id = 0) {
     
     return $next_payment;
 }
+/**
+ * Get orders with budget usage for a user.
+ *
+ * @param int $user_id User ID.
+ * @return array Orders.
+ */
+function mdb_get_user_orders_with_budget($user_id) {
+    // HPOS compatible way to get orders
+    $orders = wc_get_orders(array(
+        'customer' => $user_id,
+        'limit' => -1,
+        'meta_key' => '_mdb_discount_used',
+        'meta_compare' => 'EXISTS',
+    ));
+    
+    return $orders;
+}
