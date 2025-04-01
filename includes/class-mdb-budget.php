@@ -1,433 +1,301 @@
 <?php
 /**
- * Budget Class
+ * Core budget functionality.
  *
- * Handles core budget functionality
- *
- * @package Membership Discount Budget
+ * @package Membership_Discount_Budget
  */
 
-// Exit if accessed directly
-if ( ! defined( 'ABSPATH' ) ) {
-    exit;
-}
+defined('ABSPATH') || exit;
 
 /**
- * MDB_Budget Class
+ * MDB_Budget Class.
  */
 class MDB_Budget {
-
     /**
-     * DB Table name
+     * Single instance of the class.
      *
-     * @var string
+     * @var MDB_Budget
      */
-    private $table_name;
+    protected static $_instance = null;
 
     /**
-     * Constructor
+     * Main class instance.
+     *
+     * @return MDB_Budget
+     */
+    public static function instance() {
+        if (is_null(self::$_instance)) {
+            self::$_instance = new self();
+        }
+        return self::$_instance;
+    }
+
+    /**
+     * Constructor.
      */
     public function __construct() {
-        global $wpdb;
-        $this->table_name = $wpdb->prefix . 'membership_discount_budget';
-        
-        // Register hooks
-        $this->register_hooks();
+        $this->init_hooks();
     }
 
     /**
-     * Register hooks
+     * Initialize hooks.
      */
-    private function register_hooks() {
-        // Memberships hooks
-        add_action( 'wc_memberships_user_membership_status_changed', array( $this, 'handle_membership_status_change' ), 10, 3 );
+    private function init_hooks() {
+        // Apply discount for members
+        add_filter('woocommerce_product_get_price', array($this, 'apply_member_discount'), 999, 2);
+        add_filter('woocommerce_product_variation_get_price', array($this, 'apply_member_discount'), 999, 2);
+
+        // Save discount information to order
+        add_action('woocommerce_checkout_create_order_line_item', array($this, 'add_discount_data_to_order_item'), 10, 4);
         
-        // Subscription hooks
-        add_action( 'woocommerce_subscription_payment_complete', array( $this, 'handle_subscription_payment' ) );
+        // Process order completion
+        add_action('woocommerce_order_status_completed', array($this, 'process_completed_order'));
         
-        // Order hooks
-        add_action( 'woocommerce_checkout_create_order', array( $this, 'add_budget_data_to_order' ), 10, 2 );
-        add_action( 'woocommerce_order_status_completed', array( $this, 'update_budget_on_order_complete' ) );
+        // Clear cache for HPOS compatibility
+        add_action('woocommerce_after_order_object_save', array($this, 'clear_cache_after_order_save'));
         
-        // Product pricing
-        add_filter( 'woocommerce_product_get_price', array( $this, 'maybe_modify_product_price' ), 99, 2 );
-        add_filter( 'woocommerce_product_variation_get_price', array( $this, 'maybe_modify_product_price' ), 99, 2 );
+        // Membership and Subscription hooks
+        add_action('wc_memberships_user_membership_status_changed', array($this, 'membership_status_changed'), 10, 3);
+        add_action('woocommerce_subscription_status_updated', array($this, 'subscription_status_updated'), 10, 3);
         
-        // AJAX handlers
-        add_action( 'wp_ajax_mdb_get_user_budget', array( $this, 'ajax_get_user_budget' ) );
+        // Reset budget on subscription payment
+        add_action('woocommerce_subscription_payment_complete', array($this, 'reset_budget_on_payment'));
     }
-    
+
     /**
-     * Create a new budget for a user
+     * Apply discount to product price for members.
      *
-     * @param int $user_id User ID
-     * @param int $membership_id Membership ID
-     * @return object|bool New budget object or false on failure
+     * @param float $price Product price.
+     * @param WC_Product $product Product object.
+     * @return float Modified price.
      */
-    public function create_user_budget( $user_id, $membership_id ) {
-        global $wpdb;
+    public function apply_member_discount($price, $product) {
+        // Skip if not on frontend or price is empty
+        if (is_admin() || '' === $price) {
+            return $price;
+        }
+
+        // Skip if cart is being calculated or on checkout
+        if (defined('WOOCOMMERCE_CHECKOUT') || WC()->session->get('mdb_checking_budget')) {
+            return $price;
+        }
+
+        // Check if user has active membership
+        if (!mdb_user_has_membership()) {
+            return $price;
+        }
+
+        // Get current budget
+        $budget = mdb_get_current_budget();
         
-        $current_month = date( 'n' );
-        $current_year = date( 'Y' );
-        $now = current_time( 'mysql' );
-        $budget_amount = mdb_get_monthly_budget_amount();
-        
-        // Insert the new budget record
-        $result = $wpdb->insert(
-            $this->table_name,
-            array(
-                'user_id' => $user_id,
-                'membership_id' => $membership_id,
-                'total_budget' => $budget_amount,
-                'used_amount' => 0,
-                'remaining_budget' => $budget_amount,
-                'month' => $current_month,
-                'year' => $current_year,
-                'created_at' => $now,
-                'updated_at' => $now,
-            ),
-            array( '%d', '%d', '%f', '%f', '%f', '%d', '%d', '%s', '%s' )
-        );
-        
-        if ( ! $result ) {
-            return false;
+        // If no budget exists, create one
+        if (!$budget) {
+            $user_id = get_current_user_id();
+            $membership_id = mdb_get_user_membership_id();
+            
+            if ($membership_id) {
+                mdb_update_budget(array(
+                    'user_id' => $user_id,
+                    'membership_id' => $membership_id,
+                ));
+                
+                $budget = mdb_get_current_budget();
+            }
+        }
+
+        // If budget exists and has remaining amount
+        if ($budget && $budget->remaining_budget > 0) {
+            $discount_amount = mdb_calculate_discount_amount($price);
+            
+            // Check if we have enough budget for the full discount
+            if ($discount_amount <= $budget->remaining_budget) {
+                // We have enough budget, apply full discount
+                $discounted_price = $price - $discount_amount;
+                
+                // Store discount data temporarily for later use
+                WC()->session->set('product_' . $product->get_id() . '_discount', array(
+                    'original_price' => $price,
+                    'discount_amount' => $discount_amount,
+                    'discounted_price' => $discounted_price,
+                ));
+                
+                return $discounted_price;
+            }
         }
         
-        // Get the newly created budget
-        $budget = $this->get_budget( $wpdb->insert_id );
-        
-        // Log budget creation
-        mdb_log( sprintf( 'Created new budget for user %d with membership %d: %s', 
-            $user_id, $membership_id, print_r( $budget, true ) ) );
-        
-        return $budget;
+        // No discount applied (no membership, no budget, or budget exceeded)
+        return $price;
     }
-    
+
     /**
-     * Get a specific budget record
+     * Add discount data to order line item.
      *
-     * @param int $budget_id Budget ID
-     * @return object|bool Budget object or false if not found
+     * @param WC_Order_Item_Product $item Order item.
+     * @param string $cart_item_key Cart item key.
+     * @param array $values Cart item values.
+     * @param WC_Order $order Order.
      */
-    public function get_budget( $budget_id ) {
-        global $wpdb;
+    public function add_discount_data_to_order_item($item, $cart_item_key, $values, $order) {
+        $product_id = $item->get_product_id();
+        $discount_data = WC()->session->get('product_' . $product_id . '_discount');
         
-        $budget = $wpdb->get_row( $wpdb->prepare(
-            "SELECT * FROM {$this->table_name} WHERE id = %d",
-            $budget_id
-        ) );
-        
-        return $budget;
+        if ($discount_data) {
+            $item->add_meta_data('_mdb_original_price', $discount_data['original_price']);
+            $item->add_meta_data('_mdb_discount_amount', $discount_data['discount_amount']);
+            $item->add_meta_data('_mdb_discounted_price', $discount_data['discounted_price']);
+            
+            // Clear session data
+            WC()->session->__unset('product_' . $product_id . '_discount');
+        }
     }
-    
+
     /**
-     * Update a budget record
+     * Process completed order to update budget usage.
      *
-     * @param int $budget_id Budget ID
-     * @param array $data Data to update
-     * @return bool Success or failure
+     * @param int $order_id Order ID.
      */
-    public function update_budget( $budget_id, $data ) {
-        global $wpdb;
+    public function process_completed_order($order_id) {
+        // Get order
+        $order = wc_get_order($order_id);
         
-        // Add updated timestamp
-        $data['updated_at'] = current_time( 'mysql' );
-        
-        // Update the budget record
-        $result = $wpdb->update(
-            $this->table_name,
-            $data,
-            array( 'id' => $budget_id ),
-            array( '%f', '%f', '%f', '%s' ),
-            array( '%d' )
-        );
-        
-        // Log budget update
-        mdb_log( sprintf( 'Updated budget %d with data: %s', 
-            $budget_id, print_r( $data, true ) ) );
-        
-        return ( false !== $result );
-    }
-    
-    /**
-     * Update budget usage
-     *
-     * @param int $budget_id Budget ID
-     * @param float $amount Amount to add to used amount
-     * @return bool Success or failure
-     */
-    public function update_budget_usage( $budget_id, $amount ) {
-        global $wpdb;
-        
-        // Get the current budget
-        $budget = $this->get_budget( $budget_id );
-        
-        if ( ! $budget ) {
-            return false;
+        if (!$order) {
+            return;
         }
         
-        // Calculate new amounts
-        $used_amount = $budget->used_amount + $amount;
-        $remaining_budget = $budget->total_budget - $used_amount;
+        // Get customer ID
+        $user_id = $order->get_customer_id();
         
-        // If remaining would be negative, cap at zero
-        if ( $remaining_budget < 0 ) {
-            $remaining_budget = 0;
+        if (!$user_id || !mdb_user_has_membership($user_id)) {
+            return;
         }
-        
-        // Update the budget
-        return $this->update_budget( $budget_id, array(
-            'used_amount' => $used_amount,
-            'remaining_budget' => $remaining_budget,
-        ) );
-    }
-    
-    /**
-     * Reset user budget
-     *
-     * @param int $user_id User ID
-     * @param int $membership_id Membership ID
-     * @return object|bool New budget object or false on failure
-     */
-    public function reset_user_budget( $user_id, $membership_id ) {
-        global $wpdb;
         
         // Get current budget
-        $current_budget = mdb_get_user_current_budget( $user_id );
+        $budget = mdb_get_user_budget($user_id, current_time('n'), current_time('Y'));
         
-        // If there's an existing budget, archive it by setting remaining to 0
-        if ( $current_budget ) {
-            $this->update_budget( $current_budget->id, array(
-                'remaining_budget' => 0,
-                'used_amount' => $current_budget->total_budget,
-            ) );
+        if (!$budget) {
+            return;
         }
         
-        // Create a new budget
-        return $this->create_user_budget( $user_id, $membership_id );
-    }
-    
-    /**
-     * Handle membership status change
-     *
-     * @param \WC_Memberships_User_Membership $user_membership User membership object
-     * @param string $old_status Old status
-     * @param string $new_status New status
-     */
-    public function handle_membership_status_change( $user_membership, $old_status, $new_status ) {
-        $user_id = $user_membership->get_user_id();
-        $membership_id = $user_membership->get_id();
+        // Calculate total discount used in this order
+        $total_discount = 0;
         
-        // If membership becomes active, check/create budget
-        if ( 'active' === $new_status ) {
-            $eligible_plans = mdb_get_eligible_membership_plans();
+        foreach ($order->get_items() as $item) {
+            $discount_amount = $item->get_meta('_mdb_discount_amount');
             
-            // Check if this membership plan is eligible
-            if ( in_array( $user_membership->get_plan_id(), $eligible_plans ) ) {
-                // Get current budget or create new one
-                $budget = mdb_get_user_current_budget( $user_id );
-                
-                if ( ! $budget ) {
-                    $this->create_user_budget( $user_id, $membership_id );
-                }
+            if ($discount_amount) {
+                $quantity = $item->get_quantity();
+                $total_discount += ($discount_amount * $quantity);
             }
         }
         
-        // If membership becomes inactive, update budget
-        if ( 'active' === $old_status && 'active' !== $new_status ) {
-            $budget = mdb_get_user_current_budget( $user_id );
+        if ($total_discount > 0) {
+            // Update budget usage
+            $new_used_amount = $budget->used_amount + $total_discount;
+            $new_remaining_budget = max(0, $budget->total_budget - $new_used_amount);
             
-            if ( $budget && $budget->membership_id == $membership_id ) {
-                // Set remaining budget to 0
-                $this->update_budget( $budget->id, array(
-                    'remaining_budget' => 0,
-                ) );
+            mdb_update_budget(array(
+                'id' => $budget->id,
+                'user_id' => $user_id,
+                'membership_id' => $budget->membership_id,
+                'total_budget' => $budget->total_budget,
+                'used_amount' => $new_used_amount,
+                'remaining_budget' => $new_remaining_budget,
+                'month' => $budget->month,
+                'year' => $budget->year,
+            ));
+            
+            // Add budget usage to order meta
+            $order->add_meta_data('_mdb_discount_used', $total_discount);
+            $order->add_meta_data('_mdb_remaining_budget', $new_remaining_budget);
+            $order->save();
+        }
+    }
+
+    /**
+     * Clear cache after order save for HPOS compatibility.
+     *
+     * @param WC_Order $order Order object.
+     */
+    public function clear_cache_after_order_save($order) {
+        if (method_exists($order, 'get_id')) {
+            wp_cache_delete('order-items-' . $order->get_id(), 'orders');
+        }
+    }
+
+    /**
+     * Handle membership status changes.
+     *
+     * @param WC_Memberships_User_Membership $membership The membership.
+     * @param string $old_status Previous status.
+     * @param string $new_status New status.
+     */
+    public function membership_status_changed($membership, $old_status, $new_status) {
+        $user_id = $membership->get_user_id();
+        
+        if ('active' === $new_status) {
+            // Membership activated, create or update budget
+            $budget = mdb_get_current_budget($user_id);
+            
+            if (!$budget) {
+                mdb_update_budget(array(
+                    'user_id' => $user_id,
+                    'membership_id' => $membership->get_id(),
+                ));
             }
         }
     }
-    
+
     /**
-     * Handle subscription payment
+     * Handle subscription status changes.
      *
-     * @param \WC_Subscription $subscription Subscription object
+     * @param WC_Subscription $subscription The subscription.
+     * @param string $old_status Previous status.
+     * @param string $new_status New status.
      */
-    public function handle_subscription_payment( $subscription ) {
+    public function subscription_status_updated($subscription, $old_status, $new_status) {
+        if ('active' === $new_status) {
+            $user_id = $subscription->get_user_id();
+            
+            if ($user_id && mdb_user_has_membership($user_id)) {
+                // Subscription activated, reset budget
+                $this->reset_user_budget($user_id);
+            }
+        }
+    }
+
+    /**
+     * Reset budget when subscription payment is completed.
+     *
+     * @param WC_Subscription $subscription The subscription.
+     */
+    public function reset_budget_on_payment($subscription) {
         $user_id = $subscription->get_user_id();
         
-        // Check if user has eligible membership
-        $membership = mdb_user_has_eligible_membership( $user_id );
+        if ($user_id && mdb_user_has_membership($user_id)) {
+            $this->reset_user_budget($user_id);
+        }
+    }
+
+    /**
+     * Reset a user's budget.
+     *
+     * @param int $user_id User ID.
+     */
+    private function reset_user_budget($user_id) {
+        $membership_id = mdb_get_user_membership_id($user_id);
         
-        if ( $membership ) {
-            // Reset budget on subscription payment
-            $this->reset_user_budget( $user_id, $membership->get_id() );
+        if ($membership_id) {
+            $monthly_budget = get_option('mdb_monthly_budget', 300);
             
-            // Log the budget reset
-            mdb_log( sprintf( 'Reset budget for user %d due to subscription payment', $user_id ) );
+            mdb_update_budget(array(
+                'user_id' => $user_id,
+                'membership_id' => $membership_id,
+                'total_budget' => $monthly_budget,
+                'used_amount' => 0,
+                'remaining_budget' => $monthly_budget,
+                'month' => current_time('n'),
+                'year' => current_time('Y'),
+            ));
         }
-    }
-    
-    /**
-     * Add budget data to order meta
-     *
-     * @param \WC_Order $order Order object
-     * @param array $data Order data
-     */
-    public function add_budget_data_to_order( $order, $data ) {
-        $user_id = $order->get_user_id();
-        
-        // Only process for logged-in users with memberships
-        if ( ! $user_id || ! mdb_user_has_eligible_membership( $user_id ) ) {
-            return;
-        }
-        
-        // Get user's current budget
-        $budget = mdb_get_user_current_budget( $user_id );
-        
-        if ( ! $budget ) {
-            return;
-        }
-        
-        // Calculate discount amount for the order
-        $discount_amount = mdb_calculate_order_discount_amount( $order );
-        
-        // Store budget info in order meta
-        $order->update_meta_data( '_mdb_budget_id', $budget->id );
-        $order->update_meta_data( '_mdb_discount_amount', $discount_amount );
-        $order->update_meta_data( '_mdb_remaining_budget_before', $budget->remaining_budget );
-        
-        // Calculate remaining budget after this order
-        $remaining_after = $budget->remaining_budget - $discount_amount;
-        if ( $remaining_after < 0 ) {
-            $remaining_after = 0;
-        }
-        
-        $order->update_meta_data( '_mdb_remaining_budget_after', $remaining_after );
-    }
-    
-    /**
-     * Update budget when order is completed
-     *
-     * @param int $order_id Order ID
-     */
-    public function update_budget_on_order_complete( $order_id ) {
-        $order = wc_get_order( $order_id );
-        
-        if ( ! $order ) {
-            return;
-        }
-        
-        // Check if this order has budget data
-        $budget_id = $order->get_meta( '_mdb_budget_id' );
-        $discount_amount = $order->get_meta( '_mdb_discount_amount' );
-        
-        if ( ! $budget_id || ! $discount_amount ) {
-            return;
-        }
-        
-        // Update the budget usage
-        $this->update_budget_usage( $budget_id, $discount_amount );
-        
-        // Log the budget update
-        mdb_log( sprintf( 'Updated budget %d after order completion %d with discount amount %f', 
-            $budget_id, $order_id, $discount_amount ) );
-    }
-    
-    /**
-     * Modify product price based on available budget
-     *
-     * @param float $price Product price
-     * @param \WC_Product $product Product object
-     * @return float Modified price
-     */
-    public function maybe_modify_product_price( $price, $product ) {
-        // Only apply for logged in users
-        if ( ! is_user_logged_in() ) {
-            return $price;
-        }
-        
-        $user_id = get_current_user_id();
-        
-        // Check if user has eligible membership
-        if ( ! mdb_user_has_eligible_membership( $user_id ) ) {
-            return $price;
-        }
-        
-        // Check if product is eligible for discount
-        if ( ! mdb_is_product_eligible_for_discount( $product->get_id() ) ) {
-            return $price;
-        }
-        
-        // Get user's current budget
-        $budget = mdb_get_user_current_budget( $user_id );
-        
-        if ( ! $budget || $budget->remaining_budget <= 0 ) {
-            return $price;
-        }
-        
-        // Calculate discount amount
-        $discount_percentage = mdb_get_discount_percentage();
-        $discount_amount = ( $price * $discount_percentage ) / 100;
-        
-        // Check if discount exceeds remaining budget
-        if ( $discount_amount > $budget->remaining_budget ) {
-            // Calculate what percentage we can apply with remaining budget
-            $possible_percentage = ( $budget->remaining_budget / $price ) * 100;
-            
-            // Apply partial discount if possible
-            if ( $possible_percentage > 0 ) {
-                $discount_amount = ( $price * $possible_percentage ) / 100;
-            } else {
-                // No discount can be applied
-                return $price;
-            }
-        }
-        
-        // Apply discount to price
-        $discounted_price = $price - $discount_amount;
-        
-        return $discounted_price;
-    }
-    
-    /**
-     * AJAX handler for getting user budget
-     */
-    public function ajax_get_user_budget() {
-        // Check nonce
-        if ( ! check_ajax_referer( 'mdb-frontend-nonce', 'nonce', false ) ) {
-            wp_send_json_error( array( 'message' => __( 'Security check failed', 'membership-discount-budget' ) ) );
-        }
-        
-        // Check if user is logged in
-        if ( ! is_user_logged_in() ) {
-            wp_send_json_error( array( 'message' => __( 'You must be logged in to view budget information', 'membership-discount-budget' ) ) );
-        }
-        
-        $user_id = get_current_user_id();
-        
-        // Get budget
-        $budget = mdb_get_user_current_budget( $user_id );
-        
-        if ( ! $budget ) {
-            wp_send_json_error( array( 'message' => __( 'No active budget found', 'membership-discount-budget' ) ) );
-        }
-        
-        // Get subscription info
-        $next_payment_date = mdb_get_next_subscription_payment_date( $user_id );
-        
-        // Prepare response
-        $response = array(
-            'budget' => $budget,
-            'formatted' => array(
-                'total_budget' => mdb_format_price( $budget->total_budget ),
-                'used_amount' => mdb_format_price( $budget->used_amount ),
-                'remaining_budget' => mdb_format_price( $budget->remaining_budget ),
-            ),
-            'percentage_used' => ( $budget->used_amount / $budget->total_budget ) * 100,
-            'percentage_remaining' => ( $budget->remaining_budget / $budget->total_budget ) * 100,
-            'is_low' => mdb_is_budget_low( $budget ),
-            'next_payment_date' => $next_payment_date ? date_i18n( get_option( 'date_format' ), strtotime( $next_payment_date ) ) : false,
-        );
-        
-        wp_send_json_success( $response );
     }
 }
