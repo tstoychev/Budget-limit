@@ -1,310 +1,394 @@
 <?php
 /**
- * Frontend Class
+ * Frontend functionality.
  *
- * Handles front-end display
- *
- * @package Membership Discount Budget
+ * @package Membership_Discount_Budget
  */
 
-// Exit if accessed directly
-if ( ! defined( 'ABSPATH' ) ) {
-    exit;
-}
+defined('ABSPATH') || exit;
 
 /**
- * MDB_Frontend Class
+ * MDB_Frontend Class.
  */
 class MDB_Frontend {
+    /**
+     * Single instance of the class.
+     *
+     * @var MDB_Frontend
+     */
+    protected static $_instance = null;
 
     /**
-     * Constructor
+     * Main class instance.
+     *
+     * @return MDB_Frontend
+     */
+    public static function instance() {
+        if (is_null(self::$_instance)) {
+            self::$_instance = new self();
+        }
+        return self::$_instance;
+    }
+
+    /**
+     * Constructor.
      */
     public function __construct() {
-        // Register hooks
-        $this->register_hooks();
+        $this->init_hooks();
     }
 
     /**
-     * Register hooks
+     * Initialize hooks.
      */
-    private function register_hooks() {
-        // My Account page
-        add_action( 'woocommerce_account_dashboard', array( $this, 'show_budget_info_on_account' ) );
+    private function init_hooks() {
+        // Display budget information on My Account page
+        add_action('woocommerce_account_dashboard', array($this, 'display_budget_info'));
         
-        // Cart page
-        add_action( 'woocommerce_before_cart_table', array( $this, 'show_budget_info_on_cart' ) );
-        add_action( 'woocommerce_cart_totals_before_order_total', array( $this, 'show_discount_budget_in_cart_totals' ) );
+        // Add budget tab to My Account
+        add_filter('woocommerce_account_menu_items', array($this, 'add_budget_account_menu_item'));
+        add_action('woocommerce_account_discount-budget_endpoint', array($this, 'budget_account_content'));
+        add_action('init', array($this, 'add_budget_endpoint'));
         
-        // Checkout page
-        add_action( 'woocommerce_before_checkout_form', array( $this, 'show_budget_info_on_checkout' ), 10 );
+        // Add budget information to cart page
+        add_action('woocommerce_before_cart', array($this, 'display_cart_budget_info'));
         
-        // Order pages
-        add_action( 'woocommerce_order_details_after_order_table', array( $this, 'show_budget_info_on_order' ), 10, 1 );
+        // Add budget information to order details
+        add_action('woocommerce_order_details_after_order_table', array($this, 'display_order_budget_info'));
         
-        // Add notices
-        add_action( 'template_redirect', array( $this, 'add_budget_notices' ) );
+        // Enqueue frontend assets
+        add_action('wp_enqueue_scripts', array($this, 'enqueue_frontend_assets'));
     }
-    
+
     /**
-     * Display budget information on My Account page
+     * Add budget endpoint for My Account page.
      */
-    public function show_budget_info_on_account() {
-        // Check if display is enabled
-        if ( 'yes' !== mdb_get_settings( 'display_budget_on_account' ) ) {
-            return;
-        }
-        
-        // Only show for logged in users with eligible membership
-        if ( ! is_user_logged_in() || ! mdb_user_has_eligible_membership( get_current_user_id() ) ) {
-            return;
-        }
-        
-        // Get user's current budget
-        $budget = mdb_get_user_current_budget( get_current_user_id() );
-        
-        if ( ! $budget ) {
-            return;
-        }
-        
-        // Get subscription info
-        $next_payment_date = mdb_get_next_subscription_payment_date( get_current_user_id() );
-        
-        // Calculate percentages
-        $percentage_used = ( $budget->used_amount / $budget->total_budget ) * 100;
-        $percentage_remaining = ( $budget->remaining_budget / $budget->total_budget ) * 100;
-        $is_low = mdb_is_budget_low( $budget );
-        
-        // Display budget information
-        wc_get_template(
-            'membership-budget-account.php',
-            array(
-                'budget' => $budget,
-                'formatted_total' => mdb_format_price( $budget->total_budget ),
-                'formatted_used' => mdb_format_price( $budget->used_amount ),
-                'formatted_remaining' => mdb_format_price( $budget->remaining_budget ),
-                'percentage_used' => $percentage_used,
-                'percentage_remaining' => $percentage_remaining,
-                'is_low' => $is_low,
-                'next_payment_date' => $next_payment_date ? date_i18n( get_option( 'date_format' ), strtotime( $next_payment_date ) ) : false,
-            ),
-            '',
-            MDB_PLUGIN_DIR . 'templates/'
-        );
-    }
-    
+    public function add_budget_endpoint() {
+        add_rewrite_endpoint('discount-budget', EP_ROOT | EP_PAGES);}
+
     /**
-     * Display budget information on cart page
-     */
-    public function show_budget_info_on_cart() {
-        // Check if display is enabled
-        if ( 'yes' !== mdb_get_settings( 'display_budget_on_cart' ) ) {
-            return;
-        }
-        
-        // Only show for logged in users with eligible membership
-        if ( ! is_user_logged_in() || ! mdb_user_has_eligible_membership( get_current_user_id() ) ) {
-            return;
-        }
-        
-        // Get user's current budget
-        $budget = mdb_get_user_current_budget( get_current_user_id() );
-        
-        if ( ! $budget ) {
-            return;
-        }
-        
-        // Get cart discount amount
-        $cart_total = WC()->cart->get_subtotal();
-        $discount_percentage = mdb_get_discount_percentage();
-        $potential_discount = ( $cart_total * $discount_percentage ) / 100;
-        
-        // Check if discount would exceed remaining budget
-        $would_exceed = ( $potential_discount > $budget->remaining_budget );
-        $available_discount = $would_exceed ? $budget->remaining_budget : $potential_discount;
-        
-        // Display budget information
-        wc_get_template(
-            'membership-budget-cart.php',
-            array(
-                'budget' => $budget,
-                'formatted_total' => mdb_format_price( $budget->total_budget ),
-                'formatted_used' => mdb_format_price( $budget->used_amount ),
-                'formatted_remaining' => mdb_format_price( $budget->remaining_budget ),
-                'potential_discount' => $potential_discount,
-                'formatted_potential_discount' => mdb_format_price( $potential_discount ),
-                'would_exceed' => $would_exceed,
-                'available_discount' => $available_discount,
-                'formatted_available_discount' => mdb_format_price( $available_discount ),
-            ),
-            '',
-            MDB_PLUGIN_DIR . 'templates/'
-        );
-    }
-    
-    /**
-     * Display discount budget information in cart totals
-     */
-    public function show_discount_budget_in_cart_totals() {
-        // Only show for logged in users with eligible membership
-        if ( ! is_user_logged_in() || ! mdb_user_has_eligible_membership( get_current_user_id() ) ) {
-            return;
-        }
-        
-        // Get user's current budget
-        $budget = mdb_get_user_current_budget( get_current_user_id() );
-        
-        if ( ! $budget ) {
-            return;
-        }
-        
-        // Get cart discount amount
-        $cart_total = WC()->cart->get_subtotal();
-        $discount_percentage = mdb_get_discount_percentage();
-        $potential_discount = ( $cart_total * $discount_percentage ) / 100;
-        
-        // Check if discount would exceed remaining budget
-        $would_exceed = ( $potential_discount > $budget->remaining_budget );
-        $available_discount = $would_exceed ? $budget->remaining_budget : $potential_discount;
-        
-        // Display in cart totals
-        ?>
-        <tr class="mdb-discount-budget">
-            <th><?php _e( 'Membership Discount', 'membership-discount-budget' ); ?></th>
-            <td>-<?php echo mdb_format_price( $available_discount ); ?></td>
-        </tr>
-        <?php
-    }
-    
-    /**
-     * Display budget information on checkout page
-     */
-    public function show_budget_info_on_checkout() {
-        // Only show for logged in users with eligible membership
-        if ( ! is_user_logged_in() || ! mdb_user_has_eligible_membership( get_current_user_id() ) ) {
-            return;
-        }
-        
-        // Get user's current budget
-        $budget = mdb_get_user_current_budget( get_current_user_id() );
-        
-        if ( ! $budget ) {
-            return;
-        }
-        
-        // Get cart discount amount
-        $cart_total = WC()->cart->get_subtotal();
-        $discount_percentage = mdb_get_discount_percentage();
-        $potential_discount = ( $cart_total * $discount_percentage ) / 100;
-        
-        // Check if discount would exceed remaining budget
-        $would_exceed = ( $potential_discount > $budget->remaining_budget );
-        $available_discount = $would_exceed ? $budget->remaining_budget : $potential_discount;
-        
-        // Display budget information
-        wc_get_template(
-            'membership-budget-checkout.php',
-            array(
-                'budget' => $budget,
-                'formatted_remaining' => mdb_format_price( $budget->remaining_budget ),
-                'potential_discount' => $potential_discount,
-                'formatted_potential_discount' => mdb_format_price( $potential_discount ),
-                'would_exceed' => $would_exceed,
-                'available_discount' => $available_discount,
-                'formatted_available_discount' => mdb_format_price( $available_discount ),
-            ),
-            '',
-            MDB_PLUGIN_DIR . 'templates/'
-        );
-    }
-    
-    /**
-     * Display budget information on order page
+     * Add budget menu item to My Account menu.
      *
-     * @param \WC_Order $order Order object
+     * @param array $menu_items Menu items.
+     * @return array Modified menu items.
      */
-    public function show_budget_info_on_order( $order ) {
-        // Only show for the user who owns the order
-        if ( ! is_user_logged_in() || $order->get_user_id() !== get_current_user_id() ) {
-            return;
-        }
+    public function add_budget_account_menu_item($menu_items) {
+        // Add the budget item after the dashboard
+        $new_menu_items = array();
         
-        // Check if order has budget data
-        $budget_id = $order->get_meta( '_mdb_budget_id' );
-        $discount_amount = $order->get_meta( '_mdb_discount_amount' );
-        $remaining_before = $order->get_meta( '_mdb_remaining_budget_before' );
-        $remaining_after = $order->get_meta( '_mdb_remaining_budget_after' );
-        
-        if ( ! $budget_id || ! $discount_amount ) {
-            return;
-        }
-        
-        // Display budget information
-        wc_get_template(
-            'membership-budget-order.php',
-            array(
-                'order' => $order,
-                'discount_amount' => $discount_amount,
-                'formatted_discount' => mdb_format_price( $discount_amount ),
-                'remaining_before' => $remaining_before,
-                'formatted_before' => mdb_format_price( $remaining_before ),
-                'remaining_after' => $remaining_after,
-                'formatted_after' => mdb_format_price( $remaining_after ),
-            ),
-            '',
-            MDB_PLUGIN_DIR . 'templates/'
-        );
-    }
-    
-    /**
-     * Add notices about budget status
-     */
-    public function add_budget_notices() {
-        // Only for logged in users
-        if ( ! is_user_logged_in() ) {
-            return;
-        }
-        
-        // Only on cart, checkout, and my account pages
-        if ( ! is_cart() && ! is_checkout() && ! is_account_page() ) {
-            return;
-        }
-        
-        // Check if user has eligible membership
-        if ( ! mdb_user_has_eligible_membership( get_current_user_id() ) ) {
-            return;
-        }
-        
-        // Get user's current budget
-        $budget = mdb_get_user_current_budget( get_current_user_id() );
-        
-        if ( ! $budget ) {
-            return;
-        }
-        
-        // Check if budget is low or depleted
-        if ( $budget->remaining_budget <= 0 ) {
-            wc_add_notice( __( 'Your membership discount budget is depleted. You will be charged regular prices until your budget resets.', 'membership-discount-budget' ), 'notice' );
-        } elseif ( mdb_is_budget_low( $budget ) ) {
-            wc_add_notice( sprintf( 
-                __( 'Your membership discount budget is running low. You have %s remaining.', 'membership-discount-budget' ),
-                mdb_format_price( $budget->remaining_budget )
-            ), 'notice' );
-        }
-        
-        // On cart and checkout, check if current order would exceed budget
-        if ( ( is_cart() || is_checkout() ) && WC()->cart ) {
-            $cart_total = WC()->cart->get_subtotal();
-            $discount_percentage = mdb_get_discount_percentage();
-            $potential_discount = ( $cart_total * $discount_percentage ) / 100;
+        foreach ($menu_items as $key => $value) {
+            $new_menu_items[$key] = $value;
             
-            // Check if discount would exceed remaining budget
-            if ( $potential_discount > $budget->remaining_budget && $budget->remaining_budget > 0 ) {
-                wc_add_notice( sprintf( 
-                    __( 'This purchase would exceed your remaining discount budget of %s. Partial discount will be applied, and the rest will be charged at regular price.', 'membership-discount-budget' ),
-                    mdb_format_price( $budget->remaining_budget )
-                ), 'notice' );
+            if ('dashboard' === $key) {
+                $new_menu_items['discount-budget'] = __('Discount Budget', 'membership-discount-budget');
             }
         }
+        
+        return $new_menu_items;
+    }
+
+    /**
+     * Display budget information on the My Account dashboard.
+     */
+    public function display_budget_info() {
+        if (!mdb_user_has_membership()) {
+            return;
+        }
+        
+        $budget = mdb_get_current_budget();
+        
+        if (!$budget) {
+            return;
+        }
+        
+        $next_payment = mdb_get_next_payment_date();
+        $percentage = ($budget->remaining_budget / $budget->total_budget) * 100;
+        
+        ?>
+        <div class="mdb-budget-summary">
+            <h3><?php _e('Your Discount Budget', 'membership-discount-budget'); ?></h3>
+            
+            <div class="mdb-budget-info">
+                <div class="mdb-budget-details">
+                    <div class="mdb-budget-item">
+                        <span class="mdb-label"><?php _e('Total Monthly Budget:', 'membership-discount-budget'); ?></span>
+                        <span class="mdb-value"><?php echo wc_price($budget->total_budget); ?></span>
+                    </div>
+                    
+                    <div class="mdb-budget-item">
+                        <span class="mdb-label"><?php _e('Used Amount:', 'membership-discount-budget'); ?></span>
+                        <span class="mdb-value"><?php echo wc_price($budget->used_amount); ?></span>
+                    </div>
+                    
+                    <div class="mdb-budget-item">
+                        <span class="mdb-label"><?php _e('Remaining Budget:', 'membership-discount-budget'); ?></span>
+                        <span class="mdb-value"><?php echo wc_price($budget->remaining_budget); ?></span>
+                    </div>
+                    
+                    <?php if ($next_payment) : ?>
+                        <div class="mdb-budget-item">
+                            <span class="mdb-label"><?php _e('Next Reset Date:', 'membership-discount-budget'); ?></span>
+                            <span class="mdb-value"><?php echo date_i18n(get_option('date_format'), strtotime($next_payment)); ?></span>
+                        </div>
+                    <?php endif; ?>
+                </div>
+                
+                <div class="mdb-budget-progress-container">
+                    <div class="mdb-budget-progress">
+                        <div class="mdb-budget-progress-bar" style="width: <?php echo esc_attr($percentage); ?>%"></div>
+                    </div>
+                    <div class="mdb-budget-percentage"><?php echo sprintf(__('%s remaining', 'membership-discount-budget'), round($percentage) . '%'); ?></div>
+                </div>
+            </div>
+            
+            <div class="mdb-budget-info-text">
+                <p><?php _e('As a member, you get a 20% discount on all products up to your monthly budget limit. Once your budget is used up, products will be available at regular prices.', 'membership-discount-budget'); ?></p>
+                <p><?php _e('Your budget will be reset automatically on your next subscription payment date.', 'membership-discount-budget'); ?></p>
+            </div>
+        </div>
+        <?php
+    }
+
+    /**
+     * Display budget account content.
+     */
+    public function budget_account_content() {
+        if (!mdb_user_has_membership()) {
+            echo '<p>' . __('You do not have an active membership with a discount budget.', 'membership-discount-budget') . '</p>';
+            return;
+        }
+        
+        $budget = mdb_get_current_budget();
+        
+        if (!$budget) {
+            echo '<p>' . __('No budget information available.', 'membership-discount-budget') . '</p>';
+            return;
+        }
+        
+        $next_payment = mdb_get_next_payment_date();
+        $percentage = ($budget->remaining_budget / $budget->total_budget) * 100;
+        $discount_percentage = get_option('mdb_discount_percentage', 20);
+        
+        // Get recent orders with budget usage
+        $orders = wc_get_orders(array(
+            'customer' => get_current_user_id(),
+            'limit' => 5,
+            'orderby' => 'date',
+            'order' => 'DESC',
+            'meta_key' => '_mdb_discount_used',
+        ));
+        
+        ?>
+        <h2><?php _e('Your Discount Budget', 'membership-discount-budget'); ?></h2>
+        
+        <div class="mdb-budget-dashboard">
+            <div class="mdb-budget-summary-card">
+                <h3><?php _e('Budget Overview', 'membership-discount-budget'); ?></h3>
+                
+                <div class="mdb-budget-details">
+                    <div class="mdb-budget-item">
+                        <span class="mdb-label"><?php _e('Total Monthly Budget:', 'membership-discount-budget'); ?></span>
+                        <span class="mdb-value"><?php echo wc_price($budget->total_budget); ?></span>
+                    </div>
+                    
+                    <div class="mdb-budget-item">
+                        <span class="mdb-label"><?php _e('Used Amount:', 'membership-discount-budget'); ?></span>
+                        <span class="mdb-value"><?php echo wc_price($budget->used_amount); ?></span>
+                    </div>
+                    
+                    <div class="mdb-budget-item">
+                        <span class="mdb-label"><?php _e('Remaining Budget:', 'membership-discount-budget'); ?></span>
+                        <span class="mdb-value"><?php echo wc_price($budget->remaining_budget); ?></span>
+                    </div>
+                    
+                    <div class="mdb-budget-item">
+                        <span class="mdb-label"><?php _e('Discount Percentage:', 'membership-discount-budget'); ?></span>
+                        <span class="mdb-value"><?php echo esc_html($discount_percentage) . '%'; ?></span>
+                    </div>
+                    
+                    <?php if ($next_payment) : ?>
+                        <div class="mdb-budget-item">
+                            <span class="mdb-label"><?php _e('Next Reset Date:', 'membership-discount-budget'); ?></span>
+                            <span class="mdb-value"><?php echo date_i18n(get_option('date_format'), strtotime($next_payment)); ?></span>
+                        </div>
+                    <?php endif; ?>
+                </div>
+                
+                <div class="mdb-budget-progress-container">
+                    <div class="mdb-budget-progress">
+                        <div class="mdb-budget-progress-bar" style="width: <?php echo esc_attr($percentage); ?>%"></div>
+                    </div>
+                    <div class="mdb-budget-percentage"><?php echo sprintf(__('%s remaining', 'membership-discount-budget'), round($percentage) . '%'); ?></div>
+                </div>
+            </div>
+            
+            <?php if (!empty($orders)) : ?>
+                <div class="mdb-budget-history-card">
+                    <h3><?php _e('Recent Orders with Discount', 'membership-discount-budget'); ?></h3>
+                    
+                    <table class="mdb-budget-history-table">
+                        <thead>
+                            <tr>
+                                <th><?php _e('Order', 'membership-discount-budget'); ?></th>
+                                <th><?php _e('Date', 'membership-discount-budget'); ?></th>
+                                <th><?php _e('Discount Used', 'membership-discount-budget'); ?></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($orders as $order) : ?>
+                                <tr>
+                                    <td>
+                                        <a href="<?php echo esc_url($order->get_view_order_url()); ?>">
+                                            <?php echo sprintf(_x('#%s', 'hash before order number', 'membership-discount-budget'), $order->get_order_number()); ?>
+                                        </a>
+                                    </td>
+                                    <td><?php echo esc_html(wc_format_datetime($order->get_date_created())); ?></td>
+                                    <td><?php echo wc_price($order->get_meta('_mdb_discount_used')); ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php endif; ?>
+        </div>
+        
+        <div class="mdb-budget-explanation">
+            <h3><?php _e('How Your Discount Budget Works', 'membership-discount-budget'); ?></h3>
+            
+            <p><?php echo sprintf(__('As a member, you receive a %1$s discount on all products up to your monthly budget limit of %2$s. For example, if a product costs 20 BGN, you will pay 18 BGN (saving 2 BGN). The 2 BGN discount will be deducted from your monthly budget.', 'membership-discount-budget'), $discount_percentage . '%', wc_price($budget->total_budget)); ?></p>
+            
+            <p><?php _e('Once your budget is fully used, products will be available at regular prices until your budget resets on your next subscription payment date.', 'membership-discount-budget'); ?></p>
+            
+            <p><?php _e('Your budget resets every month when your membership subscription is renewed.', 'membership-discount-budget'); ?></p>
+        </div>
+        <?php
+    }
+
+    /**
+     * Display budget information on the cart page.
+     */
+    public function display_cart_budget_info() {
+        if (!mdb_user_has_membership() || is_admin()) {
+            return;
+        }
+        
+        $budget = mdb_get_current_budget();
+        
+        if (!$budget) {
+            return;
+        }
+        
+        // Calculate potential discount for the cart
+        $cart = WC()->cart;
+        $cart_discount = 0;
+        $remaining_after_purchase = $budget->remaining_budget;
+        $discount_percentage = get_option('mdb_discount_percentage', 20);
+        
+        // Start tracking budget usage through cart items
+        WC()->session->set('mdb_checking_budget', true);
+        
+        foreach ($cart->get_cart() as $cart_item_key => $cart_item) {
+            $product = $cart_item['data'];
+            $product_price = $product->get_price();
+            $quantity = $cart_item['quantity'];
+            
+            $item_discount = mdb_calculate_discount_amount($product_price) * $quantity;
+            
+            // Check if we have enough budget for this item
+            if ($item_discount <= $remaining_after_purchase) {
+                $cart_discount += $item_discount;
+                $remaining_after_purchase -= $item_discount;
+            } else {
+                // We don't have enough budget for the full discount on this item
+                $affordable_quantity = floor($remaining_after_purchase / mdb_calculate_discount_amount($product_price));
+                $cart_discount += $affordable_quantity > 0 ? mdb_calculate_discount_amount($product_price) * $affordable_quantity : 0;
+                $remaining_after_purchase = 0;
+            }
+        }
+        
+        WC()->session->set('mdb_checking_budget', false);
+        
+        ?>
+        <div class="mdb-cart-budget-info">
+            <h3><?php _e('Your Discount Budget', 'membership-discount-budget'); ?></h3>
+            
+            <div class="mdb-budget-status">
+                <div class="mdb-budget-item">
+                    <span class="mdb-label"><?php _e('Current Budget:', 'membership-discount-budget'); ?></span>
+                    <span class="mdb-value"><?php echo wc_price($budget->remaining_budget); ?></span>
+                </div>
+                
+                <div class="mdb-budget-item">
+                    <span class="mdb-label"><?php _e('Discount Applied to Cart:', 'membership-discount-budget'); ?></span>
+                    <span class="mdb-value"><?php echo wc_price($cart_discount); ?></span>
+                </div>
+                
+                <div class="mdb-budget-item">
+                    <span class="mdb-label"><?php _e('Remaining After Purchase:', 'membership-discount-budget'); ?></span>
+                    <span class="mdb-value"><?php echo wc_price($remaining_after_purchase); ?></span>
+                </div>
+            </div>
+            
+            <?php if ($remaining_after_purchase <= 0) : ?>
+                <div class="mdb-budget-warning">
+                    <p><?php _e('Your discount budget will be fully used with this purchase. Some items may not receive the full discount.', 'membership-discount-budget'); ?></p>
+                </div>
+            <?php endif; ?>
+            
+            <div class="mdb-budget-explanation">
+                <p><?php echo sprintf(__('As a member, you receive a %s discount on all products up to your monthly budget limit.', 'membership-discount-budget'), $discount_percentage . '%'); ?></p>
+            </div>
+        </div>
+        <?php
+    }
+
+    /**
+     * Display budget information on the order details page.
+     *
+     * @param WC_Order $order Order object.
+     */
+    public function display_order_budget_info($order) {
+        $discount_used = $order->get_meta('_mdb_discount_used');
+        $remaining_budget = $order->get_meta('_mdb_remaining_budget');
+        
+        if (!$discount_used) {
+            return;
+        }
+        
+        ?>
+        <h2><?php _e('Discount Budget Information', 'membership-discount-budget'); ?></h2>
+        
+        <table class="woocommerce-table mdb-order-budget-table">
+            <tbody>
+                <tr>
+                    <th><?php _e('Discount Used:', 'membership-discount-budget'); ?></th>
+                    <td><?php echo wc_price($discount_used); ?></td>
+                </tr>
+                <tr>
+                    <th><?php _e('Remaining Budget After Order:', 'membership-discount-budget'); ?></th>
+                    <td><?php echo wc_price($remaining_budget); ?></td>
+                </tr>
+            </tbody>
+        </table>
+        <?php
+    }
+
+    /**
+     * Enqueue frontend assets.
+     */
+    public function enqueue_frontend_assets() {
+        wp_enqueue_style(
+            'mdb-frontend-styles',
+            MDB_PLUGIN_URL . 'assets/css/frontend.css',
+            array(),
+            MDB_VERSION
+        );
+        
+        wp_enqueue_script(
+            'mdb-frontend-scripts',
+            MDB_PLUGIN_URL . 'assets/js/frontend.js',
+            array('jquery'),
+            MDB_VERSION,
+            true
+        );
     }
 }
