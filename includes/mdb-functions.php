@@ -22,9 +22,33 @@ function mdb_get_current_budget($user_id = 0) {
         return null;
     }
 
-    $budget = mdb_get_user_budget($user_id, current_time('n'), current_time('Y'));
+    // Try to get from cache first
+    $cache_key = 'mdb_budget_' . $user_id . '_' . current_time('n') . '_' . current_time('Y');
+    $budget = wp_cache_get($cache_key);
+    
+    // If not in cache, get from database
+    if (false === $budget) {
+        $budget = mdb_get_user_budget($user_id, current_time('n'), current_time('Y'));
+        
+        // Cache for 5 minutes
+        if ($budget) {
+            wp_cache_set($cache_key, $budget, '', 300);
+        }
+    }
     
     return $budget;
+}
+
+/**
+ * Clear budget cache for a specific user, month, and year.
+ *
+ * @param int $user_id User ID.
+ * @param int $month Month number (1-12).
+ * @param int $year Year.
+ */
+function mdb_clear_budget_cache($user_id, $month, $year) {
+    $cache_key = 'mdb_budget_' . $user_id . '_' . $month . '_' . $year;
+    wp_cache_delete($cache_key);
 }
 
 /**
@@ -48,6 +72,12 @@ function mdb_get_user_budget($user_id, $month, $year) {
     return $budget;
 }
 
+/**
+ * Create or update a user's budget.
+ *
+ * @param array $data Budget data.
+ * @return int|false The number of rows updated, or false on error.
+ */
 /**
  * Create or update a user's budget.
  *
@@ -120,6 +150,9 @@ function mdb_update_budget($data) {
             )
         );
     }
+    
+    // Clear cache after update
+    mdb_clear_budget_cache($data['user_id'], $data['month'], $data['year']);
     
     return $result;
 }
