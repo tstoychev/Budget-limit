@@ -56,6 +56,9 @@ class MDB_Admin {
         
         // Enqueue admin scripts and styles
         add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_assets'));
+
+        // Add this line at the end of the method
+    add_action('update_option_mdb_monthly_budget', array($this, 'update_budgets_on_setting_change'), 10, 2);
     }
 
     /**
@@ -163,14 +166,70 @@ public function register_settings() {
         echo '<p>' . __('Configure the general settings for the membership discount budget.', 'membership-discount-budget') . '</p>';
     }
 
+   /**
+ * Monthly budget field callback.
+ */
+public function monthly_budget_callback() {
+    $value = get_option('mdb_monthly_budget', 300);
+    echo '<input type="number" step="0.01" min="0" name="mdb_monthly_budget" value="' . esc_attr($value) . '" class="regular-text" />';
+    echo '<p class="description">' . __('The monthly discount budget amount for each member in BGN.', 'membership-discount-budget') . '</p>';
+    
+    // Add script to update existing budgets
+    ?>
+    <script type="text/javascript">
+    jQuery(document).ready(function($) {
+        $('input[name="mdb_monthly_budget"]').on('change', function() {
+            console.log('Monthly budget changed: ' + $(this).val());
+        });
+    });
+    </script>
+    <?php
+}
     /**
-     * Monthly budget field callback.
-     */
-    public function monthly_budget_callback() {
-        $value = get_option('mdb_monthly_budget', 300);
-        echo '<input type="number" step="0.01" min="0" name="mdb_monthly_budget" value="' . esc_attr($value) . '" class="regular-text" />';
-        echo '<p class="description">' . __('The monthly discount budget amount for each member in BGN.', 'membership-discount-budget') . '</p>';
+ * Update all budgets when the monthly budget setting is changed.
+ *
+ * @param mixed $old_value Old option value.
+ * @param mixed $new_value New option value.
+ */
+public function update_budgets_on_setting_change($old_value, $new_value) {
+    if ($old_value === $new_value) {
+        return;
     }
+    
+    global $wpdb;
+    
+    $table_name = $wpdb->prefix . 'membership_discount_budget';
+    $month = current_time('n');
+    $year = current_time('Y');
+    
+    // Get all budgets for current month
+    $budgets = $wpdb->get_results($wpdb->prepare(
+        "SELECT * FROM {$table_name} WHERE month = %d AND year = %d",
+        $month, $year
+    ));
+    
+    if (empty($budgets)) {
+        return;
+    }
+    
+    // Update each budget
+    foreach ($budgets as $budget) {
+        $used_amount = floatval($budget->used_amount);
+        $remaining_budget = max(0, floatval($new_value) - $used_amount);
+        
+        $wpdb->update(
+            $table_name,
+            array(
+                'total_budget' => floatval($new_value),
+                'remaining_budget' => $remaining_budget,
+                'updated_at' => current_time('mysql'),
+            ),
+            array('id' => $budget->id),
+            array('%f', '%f', '%s'),
+            array('%d')
+        );
+    }
+}
 
     /**
      * Discount percentage field callback.
@@ -209,85 +268,107 @@ public function register_settings() {
     }
 
     /**
-     * User budgets page callback.
-     */
-    public function user_budgets_page() {
-        // Create custom list table if it doesn't exist yet
-        if (!class_exists('MDB_User_Budgets_List_Table')) {
-            require_once MDB_PLUGIN_DIR . 'includes/class-mdb-user-budgets-list-table.php';
-        }
+ * User budgets page callback.
+ */
+public function user_budgets_page() {
+    // Create custom list table if it doesn't exist yet
+    if (!class_exists('MDB_User_Budgets_List_Table')) {
+        require_once MDB_PLUGIN_DIR . 'includes/class-mdb-user-budgets-list-table.php';
+    }
 
-        $list_table = new MDB_User_Budgets_List_Table();
-        $list_table->prepare_items();
+    $list_table = new MDB_User_Budgets_List_Table();
+    $list_table->prepare_items();
 
-        // Process bulk actions
-        if (isset($_POST['_wpnonce']) && wp_verify_nonce($_POST['_wpnonce'], 'bulk-' . $list_table->_args['plural'])) {
-            if (isset($_POST['bulk-reset']) && !empty($_POST['budget'])) {
-                $user_ids = array_map('intval', $_POST['budget']);
-                foreach ($user_ids as $user_id) {
-                    $membership_id = mdb_get_user_membership_id($user_id);
-                    if ($membership_id) {
-                        $monthly_budget = get_option('mdb_monthly_budget', 300);
-                        mdb_update_budget(array(
-                            'user_id' => $user_id,
-                            'membership_id' => $membership_id,
-                            'total_budget' => $monthly_budget,
-                            'used_amount' => 0,
-                            'remaining_budget' => $monthly_budget,
-                            'month' => current_time('n'),
-                            'year' => current_time('Y'),
-                        ));
-                    }
-                }
-                
-                // Add admin notice
-                add_action('admin_notices', function() {
-                    echo '<div class="notice notice-success is-dismissible"><p>' . __('Budgets have been reset successfully.', 'membership-discount-budget') . '</p></div>';
-                });
-            }
-        }
-
-        // Handle individual budget edit
-        if (isset($_POST['mdb_edit_budget']) && isset($_POST['mdb_user_id']) && isset($_POST['mdb_budget_amount'])) {
-            if (isset($_POST['_wpnonce']) && wp_verify_nonce($_POST['_wpnonce'], 'mdb_edit_budget_' . $_POST['mdb_user_id'])) {
-                $user_id = intval($_POST['mdb_user_id']);
-                $budget_amount = floatval($_POST['mdb_budget_amount']);
-                
-                $budget = mdb_get_current_budget($user_id);
-                if ($budget) {
-                    $remaining = max(0, $budget_amount - $budget->used_amount);
+    // Process bulk actions
+    if (isset($_POST['_wpnonce']) && wp_verify_nonce($_POST['_wpnonce'], 'bulk-' . $list_table->_args['plural'])) {
+        if (isset($_POST['bulk-reset']) && !empty($_POST['budget'])) {
+            $user_ids = array_map('intval', $_POST['budget']);
+            foreach ($user_ids as $user_id) {
+                $membership_id = mdb_get_user_membership_id($user_id);
+                if ($membership_id) {
+                    $monthly_budget = get_option('mdb_monthly_budget', 300);
                     mdb_update_budget(array(
-                        'id' => $budget->id,
                         'user_id' => $user_id,
-                        'membership_id' => $budget->membership_id,
-                        'total_budget' => $budget_amount,
-                        'used_amount' => $budget->used_amount,
-                        'remaining_budget' => $remaining,
-                        'month' => $budget->month,
-                        'year' => $budget->year,
+                        'membership_id' => $membership_id,
+                        'total_budget' => $monthly_budget,
+                        'used_amount' => 0,
+                        'remaining_budget' => $monthly_budget,
+                        'month' => current_time('n'),
+                        'year' => current_time('Y'),
                     ));
-                    
+                }
+            }
+            
+            // Add admin notice
+            add_action('admin_notices', function() {
+                echo '<div class="notice notice-success is-dismissible"><p>' . __('Budgets have been reset successfully.', 'membership-discount-budget') . '</p></div>';
+            });
+        }
+    }
+
+    // Handle individual budget edit
+    if (isset($_POST['mdb_edit_budget']) && isset($_POST['mdb_user_id']) && isset($_POST['mdb_budget_amount'])) {
+        $nonce_name = '_wpnonce';
+        $nonce_action = 'mdb-admin-nonce';
+        
+        if (isset($_POST[$nonce_name]) && wp_verify_nonce($_POST[$nonce_name], $nonce_action)) {
+            $user_id = intval($_POST['mdb_user_id']);
+            $budget_amount = floatval($_POST['mdb_budget_amount']);
+            
+            $budget = mdb_get_current_budget($user_id);
+            if ($budget) {
+                $remaining = max(0, $budget_amount - $budget->used_amount);
+                $result = mdb_update_budget(array(
+                    'id' => $budget->id,
+                    'user_id' => $user_id,
+                    'membership_id' => $budget->membership_id,
+                    'total_budget' => $budget_amount,
+                    'used_amount' => $budget->used_amount,
+                    'remaining_budget' => $remaining,
+                    'month' => $budget->month,
+                    'year' => $budget->year,
+                ));
+                
+                if ($result) {
                     // Add admin notice
                     add_action('admin_notices', function() {
                         echo '<div class="notice notice-success is-dismissible"><p>' . __('Budget has been updated successfully.', 'membership-discount-budget') . '</p></div>';
                     });
+                } else {
+                    // Add error notice
+                    add_action('admin_notices', function() {
+                        echo '<div class="notice notice-error is-dismissible"><p>' . __('Failed to update budget.', 'membership-discount-budget') . '</p></div>';
+                    });
                 }
             }
+        } else {
+            // Add error notice - nonce verification failed
+            add_action('admin_notices', function() {
+                echo '<div class="notice notice-error is-dismissible"><p>' . __('Security check failed.', 'membership-discount-budget') . '</p></div>';
+            });
         }
-
-        ?>
-        <div class="wrap">
-            <h1 class="wp-heading-inline"><?php echo esc_html(get_admin_page_title()); ?></h1>
-            
-            <form id="user-budgets-filter" method="post">
-                <?php
-                $list_table->display();
-                ?>
-            </form>
-        </div>
-        <?php
     }
 
+    ?>
+    <div class="wrap">
+        <h1 class="wp-heading-inline"><?php echo esc_html(get_admin_page_title()); ?></h1>
+        
+        <form id="user-budgets-filter" method="post">
+            <?php
+            $list_table->display();
+            ?>
+        </form>
+    </div>
+    
+    <script type="text/javascript">
+        // Debug output
+        console.log('User Budgets Page Loaded');
+        jQuery(document).ready(function($) {
+            console.log('jQuery Ready on User Budgets Page');
+        });
+    </script>
+    <?php
+}
     /**
      * Reports page callback.
      */
@@ -473,22 +554,26 @@ public function register_settings() {
     /**
      * Enqueue admin assets.
      */
-    public function enqueue_admin_assets() {
-        wp_enqueue_style(
-            'mdb-admin-styles',
-            MDB_PLUGIN_URL . 'assets/css/admin.css',
-            array(),
-            MDB_VERSION
-        );
-        
-        wp_register_script(
-            'mdb-admin-scripts',
-            MDB_PLUGIN_URL . 'assets/js/admin.js',
-            array('jquery', 'wp-util'),
-            MDB_VERSION,
-            true
-        );
-        // Add localization for JavaScript
+   /**
+ * Enqueue admin assets.
+ */
+public function enqueue_admin_assets() {
+    wp_enqueue_style(
+        'mdb-admin-styles',
+        MDB_PLUGIN_URL . 'assets/css/admin.css',
+        array(),
+        MDB_VERSION
+    );
+    
+    wp_register_script(
+        'mdb-admin-scripts',
+        MDB_PLUGIN_URL . 'assets/js/admin.js',
+        array('jquery'),
+        MDB_VERSION,
+        true
+    );
+    
+    // Add localization for JavaScript
     wp_localize_script('mdb-admin-scripts', 'mdbL10n', array(
         'edit_budget' => __('Edit Budget', 'membership-discount-budget'),
         'budget_amount' => __('Budget Amount', 'membership-discount-budget'),
@@ -501,5 +586,5 @@ public function register_settings() {
     
     // Enqueue the script after localization
     wp_enqueue_script('mdb-admin-scripts');
-    }
+}
 }
