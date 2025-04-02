@@ -266,3 +266,11 @@ function mdb_get_user_orders_with_budget($user_id) {
     
     return $orders;
 }
+/**
+ * Add to mdb-functions.php
+ */
+function mdb_debug_log($message) {
+    if (get_option('mdb_debug_mode', false)) {
+        error_log('MDB DEBUG: ' . $message);
+    }
+}
