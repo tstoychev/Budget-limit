@@ -350,3 +350,4 @@ public function refresh_prices_after_budget_update($cart) {
         }
     }
 }
+}
