@@ -61,10 +61,18 @@ class MDB_Budget {
         // Reset budget on subscription payment
         add_action('woocommerce_subscription_payment_complete', array($this, 'reset_budget_on_payment'));
 
+        //Add this to the init_hooks method in class-mdb-budget.php:
+         add_filter('woocommerce_product_get_price', array($this, 'enforce_regular_price_for_exhausted_budget'), 1000, 2);
+         add_filter('woocommerce_product_variation_get_price', array($this, 'enforce_regular_price_for_exhausted_budget'), 1000, 2);
+
+        //Add this to the init_hooks method in class-mdb-budget.php:
+         * add_action('wp', array($this, 'check_budget_status_for_session'), 10);
+ 
         // Add this line at the end of the init_hooks method
-add_action('woocommerce_before_calculate_totals', array($this, 'refresh_prices_after_budget_update'));
+        add_action('woocommerce_before_calculate_totals', array($this, 'refresh_prices_after_budget_update'));
     }
-/**
+
+   /**
  * Apply discount to product price for members.
  *
  * @param float $price Product price.
@@ -82,18 +90,27 @@ public function apply_member_discount($price, $product) {
         return $price;
     }
 
-    // Check if user has active membership
-    if (!mdb_user_has_membership()) {
+    // Get current user ID
+    $user_id = get_current_user_id();
+    if (!$user_id) {
         return $price;
     }
 
-    // Get current budget
-    $budget = mdb_get_current_budget();
+    // Debug logging
+    mdb_debug_log("Product price hook start for Product ID " . $product->get_id() . " (" . $product->get_name() . "), Regular price: " . wc_price($price) . ", User ID: " . $user_id);
+
+    // Check if user has active membership
+    if (!mdb_user_has_membership($user_id)) {
+        mdb_debug_log("User ID " . $user_id . " has no active membership");
+        return $price;
+    }
+
+    // Get current budget directly from database to avoid caching issues
+    $budget = mdb_get_user_budget($user_id, current_time('n'), current_time('Y'));
     
     // If no budget exists, create one
     if (!$budget) {
-        $user_id = get_current_user_id();
-        $membership_id = mdb_get_user_membership_id();
+        $membership_id = mdb_get_user_membership_id($user_id);
         
         if ($membership_id) {
             mdb_update_budget(array(
@@ -101,11 +118,18 @@ public function apply_member_discount($price, $product) {
                 'membership_id' => $membership_id,
             ));
             
-            $budget = mdb_get_current_budget();
+            $budget = mdb_get_user_budget($user_id, current_time('n'), current_time('Y'));
         }
     }
 
-    // If budget exists and has remaining amount greater than zero
+    // Debug log the budget status
+    if ($budget) {
+        mdb_debug_log("Budget check for User ID " . $user_id . ": Total: " . wc_price($budget->total_budget) . ", Used: " . wc_price($budget->used_amount) . ", Remaining: " . wc_price($budget->remaining_budget));
+    } else {
+        mdb_debug_log("No budget found for User ID " . $user_id);
+    }
+
+    // Strict budget check: Only apply discount if budget exists AND remaining budget is > 0
     if ($budget && $budget->remaining_budget > 0) {
         $discount_amount = mdb_calculate_discount_amount($price);
         
@@ -115,30 +139,40 @@ public function apply_member_discount($price, $product) {
             $discounted_price = $price - $discount_amount;
             
             // Store discount data temporarily for later use
-            WC()->session->set('product_' . $product->get_id() . '_discount', array(
-                'original_price' => $price,
-                'discount_amount' => $discount_amount,
-                'discounted_price' => $discounted_price,
-            ));
+            if (WC()->session) {
+                WC()->session->set('product_' . $product->get_id() . '_discount', array(
+                    'original_price' => $price,
+                    'discount_amount' => $discount_amount,
+                    'discounted_price' => $discounted_price,
+                ));
+            }
+            
+            mdb_debug_log("Discount applied for Product ID " . $product->get_id() . ": Regular price: " . wc_price($price) . ", Discounted price: " . wc_price($discounted_price) . ", Discount: " . wc_price($discount_amount));
             
             return $discounted_price;
         } else {
             // Not enough remaining budget for full discount
+            mdb_debug_log("Not enough budget for Product ID " . $product->get_id() . " - Required: " . wc_price($discount_amount) . ", Available: " . wc_price($budget->remaining_budget));
+            
             // Clear any previously stored discount data for this product
-            WC()->session->__unset('product_' . $product->get_id() . '_discount');
+            if (WC()->session) {
+                WC()->session->__unset('product_' . $product->get_id() . '_discount');
+            }
         }
     } else {
         // Budget is exhausted or non-existent
+        mdb_debug_log("Budget is exhausted or non-existent for User ID " . $user_id);
+        
         // Clear any previously stored discount data for this product
         if (WC()->session) {
             WC()->session->__unset('product_' . $product->get_id() . '_discount');
         }
     }
     
-    // No discount applied (no membership, no budget, or budget exceeded)
+    // No discount applied
+    mdb_debug_log("No discount applied for Product ID " . $product->get_id() . " - Returning regular price: " . wc_price($price));
     return $price;
 }
-   
 
     /**
      * Add discount data to order line item.
@@ -329,7 +363,94 @@ public function process_completed_order($order_id) {
             ));
         }
     }
+/**
+ * Ensure that regular prices are used when budget is exhausted.
+ * This is a safety check that runs after all other price filters.
+ * 
+ * @param float $price Product price.
+ * @param WC_Product $product Product object.
+ * @return float Modified price.
+ */
+public function enforce_regular_price_for_exhausted_budget($price, $product) {
+    // Skip if not on frontend
+    if (is_admin()) {
+        return $price;
+    }
+    
+    // Get current user ID
+    $user_id = get_current_user_id();
+    if (!$user_id) {
+        return $price;
+    }
+    
+    // Check if user has active membership
+    if (!mdb_user_has_membership($user_id)) {
+        return $price;
+    }
+    
+    // Get current budget directly from database to avoid caching issues
+    $budget = mdb_get_user_budget($user_id, current_time('n'), current_time('Y'));
+    
+    // If budget is exhausted, ensure the regular price is used
+    if (!$budget || $budget->remaining_budget <= 0) {
+        // Get the regular price directly
+        $regular_price = $product->get_regular_price();
+        
+        // If the current price is less than the regular price, it's discounted
+        if ($price < $regular_price) {
+            mdb_debug_log("Enforcing regular price for Product ID " . $product->get_id() . " due to exhausted budget - Current price: " . wc_price($price) . ", Regular price: " . wc_price($regular_price));
+            return $regular_price;
+        }
+    }
+    
+    return $price;
+}
 
+/**
+ * Check budget status and clear session if budget is exhausted.
+ */
+public function check_budget_status_for_session() {
+    // Skip if not on frontend or user not logged in
+    if (is_admin() || !is_user_logged_in()) {
+        return;
+    }
+    
+    // Get current user ID
+    $user_id = get_current_user_id();
+    
+    // Check if user has active membership
+    if (!mdb_user_has_membership($user_id)) {
+        return;
+    }
+    
+    // Get current budget directly from database to avoid caching issues
+    $budget = mdb_get_user_budget($user_id, current_time('n'), current_time('Y'));
+    
+    // If budget is exhausted, clear all discount sessions
+    if (!$budget || $budget->remaining_budget <= 0) {
+        mdb_debug_log("Budget exhausted for User ID " . $user_id . " - Clearing all discount sessions");
+        
+        if (WC()->session) {
+            // Get all session data
+            $session_data = WC()->session->get_session_data();
+            
+            // Find and clear all discount-related session data
+            foreach ($session_data as $key => $value) {
+                if (strpos($key, '_discount') !== false) {
+                    WC()->session->__unset($key);
+                }
+            }
+            
+            // Set a flag to indicate budget is exhausted
+            WC()->session->set('mdb_budget_exhausted', true);
+        }
+    } else {
+        // Budget is not exhausted, clear the exhausted flag if it exists
+        if (WC()->session && WC()->session->get('mdb_budget_exhausted')) {
+            WC()->session->__unset('mdb_budget_exhausted');
+        }
+    }
+}
     /**
  * Refreshes prices after budget is updated
  */
