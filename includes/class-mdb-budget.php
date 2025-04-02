@@ -66,7 +66,7 @@ class MDB_Budget {
          add_filter('woocommerce_product_variation_get_price', array($this, 'enforce_regular_price_for_exhausted_budget'), 1000, 2);
 
         //Add this to the init_hooks method in class-mdb-budget.php:
-         * add_action('wp', array($this, 'check_budget_status_for_session'), 10);
+         add_action('wp', array($this, 'check_budget_status_for_session'), 10);
  
         // Add this line at the end of the init_hooks method
         add_action('woocommerce_before_calculate_totals', array($this, 'refresh_prices_after_budget_update'));
