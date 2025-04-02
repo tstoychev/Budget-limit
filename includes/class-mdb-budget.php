@@ -60,72 +60,85 @@ class MDB_Budget {
         
         // Reset budget on subscription payment
         add_action('woocommerce_subscription_payment_complete', array($this, 'reset_budget_on_payment'));
+
+        // Add this line at the end of the init_hooks method
+add_action('woocommerce_before_calculate_totals', array($this, 'refresh_prices_after_budget_update'));
     }
-
-    /**
-     * Apply discount to product price for members.
-     *
-     * @param float $price Product price.
-     * @param WC_Product $product Product object.
-     * @return float Modified price.
-     */
-    public function apply_member_discount($price, $product) {
-        // Skip if not on frontend or price is empty
-        if (is_admin() || '' === $price) {
-            return $price;
-        }
-
-        // Skip if cart is being calculated or on checkout
-        if (defined('WOOCOMMERCE_CHECKOUT') || WC()->session->get('mdb_checking_budget')) {
-            return $price;
-        }
-
-        // Check if user has active membership
-        if (!mdb_user_has_membership()) {
-            return $price;
-        }
-
-        // Get current budget
-        $budget = mdb_get_current_budget();
-        
-        // If no budget exists, create one
-        if (!$budget) {
-            $user_id = get_current_user_id();
-            $membership_id = mdb_get_user_membership_id();
-            
-            if ($membership_id) {
-                mdb_update_budget(array(
-                    'user_id' => $user_id,
-                    'membership_id' => $membership_id,
-                ));
-                
-                $budget = mdb_get_current_budget();
-            }
-        }
-
-        // If budget exists and has remaining amount
-        if ($budget && $budget->remaining_budget > 0) {
-            $discount_amount = mdb_calculate_discount_amount($price);
-            
-            // Check if we have enough budget for the full discount
-            if ($discount_amount <= $budget->remaining_budget) {
-                // We have enough budget, apply full discount
-                $discounted_price = $price - $discount_amount;
-                
-                // Store discount data temporarily for later use
-                WC()->session->set('product_' . $product->get_id() . '_discount', array(
-                    'original_price' => $price,
-                    'discount_amount' => $discount_amount,
-                    'discounted_price' => $discounted_price,
-                ));
-                
-                return $discounted_price;
-            }
-        }
-        
-        // No discount applied (no membership, no budget, or budget exceeded)
+/**
+ * Apply discount to product price for members.
+ *
+ * @param float $price Product price.
+ * @param WC_Product $product Product object.
+ * @return float Modified price.
+ */
+public function apply_member_discount($price, $product) {
+    // Skip if not on frontend or price is empty
+    if (is_admin() || '' === $price) {
         return $price;
     }
+
+    // Skip if cart is being calculated or on checkout
+    if (defined('WOOCOMMERCE_CHECKOUT') || WC()->session->get('mdb_checking_budget')) {
+        return $price;
+    }
+
+    // Check if user has active membership
+    if (!mdb_user_has_membership()) {
+        return $price;
+    }
+
+    // Get current budget
+    $budget = mdb_get_current_budget();
+    
+    // If no budget exists, create one
+    if (!$budget) {
+        $user_id = get_current_user_id();
+        $membership_id = mdb_get_user_membership_id();
+        
+        if ($membership_id) {
+            mdb_update_budget(array(
+                'user_id' => $user_id,
+                'membership_id' => $membership_id,
+            ));
+            
+            $budget = mdb_get_current_budget();
+        }
+    }
+
+    // If budget exists and has remaining amount greater than zero
+    if ($budget && $budget->remaining_budget > 0) {
+        $discount_amount = mdb_calculate_discount_amount($price);
+        
+        // Check if we have enough budget for the full discount
+        if ($discount_amount <= $budget->remaining_budget) {
+            // We have enough budget, apply full discount
+            $discounted_price = $price - $discount_amount;
+            
+            // Store discount data temporarily for later use
+            WC()->session->set('product_' . $product->get_id() . '_discount', array(
+                'original_price' => $price,
+                'discount_amount' => $discount_amount,
+                'discounted_price' => $discounted_price,
+            ));
+            
+            return $discounted_price;
+        } else {
+            // Not enough remaining budget for full discount
+            // Clear any previously stored discount data for this product
+            WC()->session->__unset('product_' . $product->get_id() . '_discount');
+        }
+    } else {
+        // Budget is exhausted or non-existent
+        // Clear any previously stored discount data for this product
+        if (WC()->session) {
+            WC()->session->__unset('product_' . $product->get_id() . '_discount');
+        }
+    }
+    
+    // No discount applied (no membership, no budget, or budget exceeded)
+    return $price;
+}
+   
 
     /**
      * Add discount data to order line item.
@@ -151,12 +164,7 @@ class MDB_Budget {
     }
 }
 
-    /**
-     * Process completed order to update budget usage.
-     *
-     * @param int $order_id Order ID.
-     */
-    /**
+/**
  * Process completed order to update budget usage.
  *
  * @param int $order_id Order ID.
@@ -200,6 +208,19 @@ public function process_completed_order($order_id) {
         $new_used_amount = $budget->used_amount + $total_discount;
         $new_remaining_budget = max(0, $budget->total_budget - $new_used_amount);
         
+        // Log budget update for debugging
+        if (get_option('mdb_debug_mode', false)) {
+            error_log(sprintf(
+                'Budget update for user #%d - Order #%d - Previous: %f - Used: %f - New Total: %f - Remaining: %f',
+                $user_id,
+                $order_id,
+                $budget->used_amount,
+                $total_discount,
+                $new_used_amount,
+                $new_remaining_budget
+            ));
+        }
+        
         mdb_update_budget(array(
             'id' => $budget->id,
             'user_id' => $user_id,
@@ -215,6 +236,9 @@ public function process_completed_order($order_id) {
         $order->update_meta_data('_mdb_discount_used', $total_discount);
         $order->update_meta_data('_mdb_remaining_budget', $new_remaining_budget);
         $order->save();
+        
+        // Clear any cached product prices for this user
+        WC()->session->set('mdb_budget_updated', true);
     }
 }
 
@@ -303,6 +327,26 @@ public function process_completed_order($order_id) {
                 'month' => current_time('n'),
                 'year' => current_time('Y'),
             ));
+        }
+    }
+
+    /**
+ * Refreshes prices after budget is updated
+ */
+public function refresh_prices_after_budget_update($cart) {
+    if (WC()->session && WC()->session->get('mdb_budget_updated')) {
+        // Clear the flag
+        WC()->session->set('mdb_budget_updated', false);
+        
+        // Loop through cart items and remove any cached discount data
+        foreach ($cart->get_cart() as $cart_item_key => $cart_item) {
+            $product_id = $cart_item['product_id'];
+            WC()->session->__unset('product_' . $product_id . '_discount');
+        }
+        
+        // Force WooCommerce to recalculate prices
+        foreach ($cart->get_cart() as $cart_item_key => $cart_item) {
+            $cart_item['data']->set_price($cart_item['data']->get_regular_price());
         }
     }
 }
